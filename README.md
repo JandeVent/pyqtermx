@@ -62,8 +62,12 @@ info panel and the block-letter banner and box frame drawn as vectors
   region (partial rendering end to end).
 - Retina-aware (device-pixel-ratio) backing store; crisp font-smoothed
   glyphs; bold-as-bright applied at render time.
-- Box-drawing and block characters drawn as vectors, so adjacent cells
-  join seamlessly — no font seams in `htop` or `tmux`.
+- Box-drawing, block characters, and geometric shapes (squares,
+  circles, diamonds, triangles, bullets) drawn as vectors from one
+  primitive table — adjacent cells join seamlessly (no font seams in
+  `htop` or `tmux`) and tiny glyphs (TUI spinner dots) stay crisp
+  instead of antialiasing to a speck. Braille stays in the font,
+  whose glyphs carry the correct dot patterns.
 - Glyphs aligned to the grid at fractional cell width
   (`QFontMetricsF`), so text and vector cells never drift.
 - Cursor: a 500 ms blinking block that **inverts the cell it sits on**

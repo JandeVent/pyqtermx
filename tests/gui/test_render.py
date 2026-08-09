@@ -521,6 +521,35 @@ def test_box_drawing_arms_are_orthogonal(renderer: TerminalRenderer) -> None:
         assert img.pixelColor(0, 0) != fg, f"{chr(cp)}: diagonal in the corner"
 
 
+def test_rounded_corners_reach_their_own_edges(renderer: TerminalRenderer) -> None:
+    # ╭╮╯╰ (U+256D–2570): each corner's strokes must reach its own cell
+    # edges — ╭ the top and left edges, ╮ top and right, ╯ left and
+    # bottom, ╰ right and bottom. The pre-table code drew all four
+    # rotated 180° (╭ reached bottom and right).
+    corners = {
+        0x256D: ("T", "L"),  # ╭
+        0x256E: ("T", "R"),  # ╮
+        0x256F: ("B", "L"),  # ╯
+        0x2570: ("B", "R"),  # ╰
+    }
+    for cp, arms in corners.items():
+        img = QImage(round(1 * renderer.cell_w), 1 * renderer.cell_h, QImage.Format.Format_RGB32)
+        renderer.render(img, snapshot([make_row(Cell(chr(cp), fg=1))]))
+        fg = QColor(0xCD, 0x00, 0x00)
+        cx, cy = round(renderer.cell_w // 2), renderer.cell_h // 2
+        probes = {
+            "T": (cx, 0),
+            "B": (cx, renderer.cell_h - 1),
+            "L": (0, cy),
+            "R": (round(renderer.cell_w) - 1, cy),
+        }
+        for name, (x, y) in probes.items():
+            if name in arms:
+                assert img.pixelColor(x, y) == fg, f"{chr(cp)}: {name} arm missing"
+            else:
+                assert img.pixelColor(x, y) != fg, f"{chr(cp)}: stray {name} arm"
+
+
 def test_block_half_rows_join_seamlessly(renderer: TerminalRenderer) -> None:
     # ▀▀: two cells — the top halves must tile without a gap between
     # cells (the font version leaves seams at the boundaries).
@@ -543,6 +572,81 @@ def test_block_quadrant_char_fills_only_its_quadrant(renderer: TerminalRenderer)
     assert img.pixelColor(round(renderer.cell_w) - 1, 0) == DEFAULT_BG
     assert img.pixelColor(0, renderer.cell_h - 1) == DEFAULT_BG
     assert img.pixelColor(round(renderer.cell_w) - 1, renderer.cell_h - 1) == DEFAULT_BG
+
+
+@pytest.mark.parametrize("glyph", ["\u2b1d", "\u25aa", "\u25a0", "\u25cf", "\u2022",
+                                   "\u00b7", "\u25c6", "\u25b2", "\u25b6", "\u25fc",
+                                   "\u2b24", "\u2b1b"])
+def test_shape_glyphs_draw_centered_vector_fills(renderer: TerminalRenderer, glyph: str) -> None:
+    # The geometric-shape family (⬝ ▪ ■ ● • · ◆ ▲ ▶ ◼ ⬤ ⬛): filled
+    # vector shapes — centered in the cell, small enough that the
+    # corners stay empty, and visible (the font glyphs for the small
+    # ones wash out to a speck).
+    img = QImage(round(1 * renderer.cell_w), 1 * renderer.cell_h, QImage.Format.Format_RGB32)
+    renderer.render(img, snapshot([make_row(Cell(glyph, fg=1))]))
+    fg = QColor(0xCD, 0x00, 0x00)
+    painted = [
+        (x, y)
+        for y in range(renderer.cell_h)
+        for x in range(round(renderer.cell_w))
+        if img.pixelColor(x, y) == fg
+    ]
+    assert painted, f"{glyph}: the shape must paint"
+    xs = [p[0] for p in painted]
+    ys = [p[1] for p in painted]
+    # Centered and inside the cell: corners stay empty.
+    assert min(xs) > 0 and max(xs) < round(renderer.cell_w) - 1, f"{glyph}: touches an edge"
+    assert min(ys) > 0 and max(ys) < renderer.cell_h - 1, f"{glyph}: touches an edge"
+    # The vertical middle of the cell is painted (centered).
+    assert any(y == renderer.cell_h // 2 for y in ys), f"{glyph}: not vertically centered"
+
+
+@pytest.mark.parametrize("glyph", ["\u25a1", "\u25cb", "\u25c7", "\u25b3"])  # □ ○ ◇ △
+def test_ring_shapes_draw_outlines_not_fills(renderer: TerminalRenderer, glyph: str) -> None:
+    # Hollow shapes are outlines: the rim paints, the interior shows
+    # the cell background through.
+    img = QImage(round(1 * renderer.cell_w), 1 * renderer.cell_h, QImage.Format.Format_RGB32)
+    renderer.render(img, snapshot([make_row(Cell(glyph, fg=1))]))
+    fg = QColor(0xCD, 0x00, 0x00)
+    painted = [
+        (x, y)
+        for y in range(renderer.cell_h)
+        for x in range(round(renderer.cell_w))
+        if img.pixelColor(x, y) == fg
+    ]
+    assert painted, f"{glyph}: the outline must paint"
+    # The outline is a rim: the cell center stays unpainted for a ring
+    # square and a ring circle (diamonds/triangles are filled outlines,
+    # so this only holds for □ ○).
+    if glyph in ("\u25a1", "\u25cb"):
+        assert img.pixelColor(round(renderer.cell_w // 2), renderer.cell_h // 2) != fg
+
+
+@pytest.mark.parametrize("glyph", ["\u2503", "\u2551", "\u2550", "\u2567"])  # ┃ ║ ═ ╧
+def test_unlisted_box_variants_fall_back_to_the_font(renderer: TerminalRenderer, glyph: str) -> None:
+    # Heavy/double/dashed box variants sit inside the dense 0x2500–257F
+    # range the Cython path classifies in C, but they are not in
+    # `_VECTOR_GLYPHS` — the vector drawer must fall back to the font
+    # instead of raising (a real-world crash: opencode renders ┃).
+    img = QImage(round(1 * renderer.cell_w), 1 * renderer.cell_h, QImage.Format.Format_RGB32)
+    renderer.render(img, snapshot([make_row(Cell(glyph, fg=1))]))
+    assert cell_has_color_approx(img, renderer, 0, QColor(0xCD, 0x00, 0x00)), (
+        f"{glyph}: the font fallback must paint"
+    )
+
+
+def test_braille_stays_in_the_font(renderer: TerminalRenderer) -> None:
+    # Braille (U+2800–28FF) is intentionally font-rendered: the font
+    # glyphs carry the correct dot patterns (the six-dots-circling
+    # spinner). It must NOT be classified as a vector glyph, and the
+    # glyph must paint through the normal text path.
+    from pyqtermx.render import _VECTOR_CODES
+    assert not (_VECTOR_CODES & set(range(0x2800, 0x2900))), "braille must stay in the font"
+    img = QImage(round(1 * renderer.cell_w), 1 * renderer.cell_h, QImage.Format.Format_RGB32)
+    renderer.render(img, snapshot([make_row(Cell("\u280b", fg=1))]))  # ⠋
+    assert cell_has_color_approx(img, renderer, 0, QColor(0xCD, 0x00, 0x00)), (
+        "the font must paint the braille glyph"
+    )
 
 
 # -- dim / strike / overline / italic (the rest of the SGR set) ----------

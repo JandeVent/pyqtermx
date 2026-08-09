@@ -92,12 +92,16 @@ cdef inline int _mix(int a, int b):
 
 
 cpdef list collect_runs(row, bint reverse_video, sel_range=None,
-                        int dflt_fg_rgb=_DFLT_FG_RGB, int dflt_bg_rgb=_DFLT_BG_RGB):
+                        int dflt_fg_rgb=_DFLT_FG_RGB, int dflt_bg_rgb=_DFLT_BG_RGB,
+                        codes=None):
     """The paint runs for one row — the pure, testable hot path.
 
     `dflt_fg_rgb`/`dflt_bg_rgb` are the packed default colors (the
     renderer's palette, or the module defaults when omitted) used by
-    the SGR 2 dim mix to resolve -1 cell colors.
+    the SGR 2 dim mix to resolve -1 cell colors. `codes` is the
+    renderer's vector-glyph codepoint set (`_VECTOR_CODES`) — the
+    dense box/block ranges are C checks, the sparse geometric shapes
+    and braille fall through to the set.
 
     Returns a flat list of tuples (the draw loop in `paint_row` walks
     them; render.py's fallback `_paint_row` is the reference):
@@ -108,8 +112,8 @@ cpdef list collect_runs(row, bint reverse_video, sel_range=None,
     - `(1, start, end, fg_int, sel, bold, italic, underline, strike,
       overline, text)` — a glyph run: one drawText over [start, end).
     - `(2, col, cp, data, fg_int, bg_int, fg_sel, bg_sel, bold,
-      italic, underline, strike, overline, wide)` — a box/block/wide
-      cell drawn individually.
+      italic, underline, strike, overline, wide)` — a vector/wide cell
+      drawn individually.
 
     Color ints are compared in C (the bold-is-bright step folded in),
     so no QColor is constructed per cell; the draw loop resolves one
@@ -214,8 +218,12 @@ cpdef list collect_runs(row, bint reverse_video, sel_range=None,
         else:
             cp = 0
         wide = col + 1 < n and cells[col + 1].data == ""
-        if 0x2500 <= cp <= 0x257F or 0x2580 <= cp <= 0x259F or wide:
-            # Box/block/wide chars break the run and draw individually.
+        # The `cp > 0x7F` gate keeps the ASCII hot path to C
+        # comparisons — the set lookup only runs for non-ASCII cells
+        # (vector glyphs live above ASCII; U+00B7 is the lowest).
+        if (cp > 0x7F and (0x2500 <= cp <= 0x257F or 0x2580 <= cp <= 0x259F or cp in codes)) or wide:
+            # Box/block/vector-shape/wide chars break the run and draw
+            # individually.
             if has_fg:
                 runs.append((1, run_start, col, run_fg, run_fg_sel,
                              run_bold, run_italic, run_ul, run_st, run_ol, text))
@@ -259,15 +267,18 @@ cpdef void paint_row(painter, renderer, int viewport_row, row, bint reverse_vide
                      sel_range=None):
     """Fast path for `TerminalRenderer._paint_row`: collect the runs in
     C, then make the Qt calls — one fillRect per background run, one
-    drawText per glyph run, individual draws for box/block/wide cells.
-    `renderer` supplies the color/font caches and the box/block
-    drawing helpers; the painter stays open (callers own it)."""
+    drawText per glyph run, individual draws for vector/wide cells.
+    `renderer` supplies the color/font caches, the vector codepoint
+    set, and the vector-glyph primitive painter; the painter stays
+    open (callers own it)."""
+    cdef object codes = renderer._vector_codes
     cdef list runs = collect_runs(
         row, reverse_video, sel_range,
         ((renderer._default_fg.red() << 16) | (renderer._default_fg.green() << 8)
          | renderer._default_fg.blue()),
         ((renderer._default_bg.red() << 16) | (renderer._default_bg.green() << 8)
          | renderer._default_bg.blue()),
+        codes,
     )
     cdef double cw = renderer.cell_w
     cdef int ch = renderer.cell_h
@@ -335,10 +346,9 @@ cpdef void paint_row(painter, renderer, int viewport_row, row, bint reverse_vide
             rect = QRectF(col * cw, y0, cw, ch)
             if wide:
                 rect.setWidth(2 * cw)
-            if 0x2500 <= cp <= 0x257F:  # box-drawing, vector-drawn
-                renderer._draw_box_drawing(painter, rect, cp, fg)
-            elif 0x2580 <= cp <= 0x259F:  # block characters, fillRects
-                renderer._draw_block_char(painter, rect, cp, fg, bg)
+            if 0x2500 <= cp <= 0x257F or 0x2580 <= cp <= 0x259F or cp in codes:
+                # Vector glyph: the renderer's primitive table paints it.
+                renderer._draw_vector_glyph(painter, rect, cp, fg, bg)
             else:
                 painter.setFont(font_for(bold, italic))
                 painter.setPen(fg)

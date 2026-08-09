@@ -7,9 +7,9 @@ reference (and the path used when the extension is not built).
 
 The parity rows exercise every rendition path: defaults, palette,
 bold-is-bright, SGR 7 reverse, underline/strike/overline, dim,
-box-drawing, block chars, a wide char + continuation, RGB, and a
-hidden cell — plus the DECSCNM ?5 whole-screen reverse and a
-selection, which combine with SGR 7 via the XOR.
+box-drawing, block chars, a small square, a wide char + continuation,
+RGB, and a hidden cell — plus the DECSCNM ?5 whole-screen reverse and
+a selection, which combine with SGR 7 via the XOR.
 """
 
 from __future__ import annotations
@@ -36,6 +36,11 @@ def make_snapshot(*, reverse_video: bool = False) -> Snapshot:
         Cell("F", -1, 1, dim=True),  # faint on blue
         Cell("─", 10, 0),  # box-drawing
         Cell("█", 10, 0),  # block
+        Cell("⬝", 10, 0),  # small square (vector dot)
+        Cell("●", 10, 0),  # circle (vector)
+        Cell("□", 10, 0),  # ring square (vector)
+        Cell("◆", 10, 0),  # diamond polygon (vector)
+        Cell("⠋", 10, 0),  # braille stays in the font (both paths)
         Cell("界", 3, 4), Cell("", 3, 4),  # wide + continuation
         Cell("G", rgb(0x12, 0x34, 0x56), 0),  # RGB fg
         Cell(" ", 2, 6, hidden=True),  # hidden
@@ -111,6 +116,18 @@ def test_collect_runs_bright_step_and_swap() -> None:
     applies the SGR 7 fg/bg swap — the two C-only behaviors."""
     rf = pytest.importorskip("pyqtermx._render_fast")
     row = Row([Cell("A", 5, 0, bold=True), Cell("B", 12, 0, reverse=True)])
-    glyphs = [r for r in rf.collect_runs(row, False, None) if r[0] == 1]
+    glyphs = [r for r in rf.collect_runs(row, False, None, codes=render_mod._VECTOR_CODES) if r[0] == 1]
     assert glyphs[0][3] == 13  # bold fg 5 → bright 13
     assert glyphs[1][3] == 0  # reverse: fg becomes the bg 0
+
+
+def test_collect_runs_classifies_vector_glyphs() -> None:
+    """The collector must route every `_VECTOR_GLYPHS` codepoint to an
+    individual draw (kind 2) — parity with the Python `_paint_row`."""
+    rf = pytest.importorskip("pyqtermx._render_fast")
+    cells = [Cell(chr(cp)) for cp in sorted(render_mod._VECTOR_CODES)]
+    row = Row(cells)
+    runs = rf.collect_runs(row, False, None, codes=render_mod._VECTOR_CODES)
+    kinds = {r[0] for r in runs}
+    assert kinds == {0, 2}  # background runs + individual draws, no batched text
+    assert len(runs) == len(cells) + 1  # one bg run + one draw per cell

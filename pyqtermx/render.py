@@ -11,19 +11,34 @@ colors 0–7 step up to their bright entries), reverse (fg/bg swap),
 dim (fg mixed halfway toward bg), underline, strike, overline, hidden
 (no glyph), italic (font flag), and DECSCNM ?5 (whole-screen reverse).
 
-Box-drawing (U+2500–257F) and block characters (U+2580–259F) are drawn
-as vectors — painter.drawLine / fillRect quadrant math — not through the
-font, so adjacent cells join seamlessly. SGR blink is parsed but not yet
-painted (needs a widget timer); the *cursor* blink is the widget's job —
+Box-drawing (U+2500–257F), block characters (U+2580–259F), and
+geometric shapes (squares, circles, diamonds, triangles, bullets) are
+drawn as vectors — painter.drawLine / fillRect / drawEllipse /
+drawPolygon from the `_VECTOR_GLYPHS` primitive table — not through
+the font: box and block glyphs join seamlessly across cells, and
+small shapes (TUI spinner dots, list bullets) stay crisp instead of
+antialiasing to a speck. Braille stays in the font — its glyphs carry
+the correct dot patterns. SGR blink is parsed but not yet painted
+(needs a widget timer); the *cursor* blink is the widget's job —
 `paint` takes a `cursor_visible` override the widget's timer drives.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Literal, TypeAlias, cast
 
 from PyQt6.QtCore import QPointF, QRect, QRectF, Qt, QMarginsF
-from PyQt6.QtGui import QColor, QFont, QFontDatabase, QFontMetrics, QFontMetricsF, QImage, QPainter
+from PyQt6.QtGui import (
+    QColor,
+    QFont,
+    QFontDatabase,
+    QFontMetrics,
+    QFontMetricsF,
+    QImage,
+    QPainter,
+    QPolygonF,
+)
 
 from pyqtermx.screen import Cell, Row, is_rgb, rgb_parts
 from pyqtermx.selection import Selection, column_range
@@ -41,26 +56,144 @@ _CUBE_LEVELS = (0, 95, 135, 175, 215, 255)
 DEFAULT_FG = QColor(0xE8, 0xE8, 0xE8)
 DEFAULT_BG = QColor(0x10, 0x10, 0x10)
 
-#: Block characters (U+2580–259F) as cell-relative fill rectangles
-#: (fx, fy, fw, fh) — fillRect quadrant math, so adjacent cells join
-#: without font gaps.
-_BLOCK_FILLS: dict[int, tuple[tuple[float, float, float, float], ...]] = {
-    0x2588: ((0.0, 0.0, 1.0, 1.0),),  # █ full
-    0x258C: ((0.0, 0.0, 0.5, 1.0),),  # ▌ left half
-    0x2590: ((0.5, 0.0, 0.5, 1.0),),  # ▐ right half
-    0x2580: ((0.0, 0.0, 1.0, 0.5),),  # ▀ top half
-    0x2584: ((0.0, 0.5, 1.0, 0.5),),  # ▄ bottom half
-    0x259D: ((0.5, 0.0, 0.5, 0.5),),  # ▝ top-right
-    0x2598: ((0.0, 0.0, 0.5, 0.5),),  # ▘ top-left
-    0x2596: ((0.0, 0.5, 0.5, 0.5),),  # ▖ bottom-left
-    0x2597: ((0.5, 0.5, 0.5, 0.5),),  # ▗ bottom-right
-    0x259B: ((0.0, 0.0, 1.0, 0.5), (0.0, 0.5, 0.5, 0.5)),  # ▛
-    0x259C: ((0.0, 0.0, 1.0, 0.5), (0.5, 0.5, 0.5, 0.5)),  # ▜
-    0x2599: ((0.0, 0.0, 0.5, 0.5), (0.0, 0.5, 1.0, 0.5)),  # ▙
-    0x259F: ((0.5, 0.0, 0.5, 0.5), (0.0, 0.5, 1.0, 0.5)),  # ▟
-    0x259A: ((0.0, 0.0, 0.5, 0.5), (0.5, 0.5, 0.5, 0.5)),  # ▚
-    0x259E: ((0.5, 0.0, 0.5, 0.5), (0.0, 0.5, 0.5, 0.5)),  # ▞
+#: One drawing instruction in `_VECTOR_GLYPHS` — the geometry contract
+#: is documented on the table itself.
+_Primitive: TypeAlias = (
+    tuple[Literal["fill"], float, float, float, float, Literal["fg", "bg"]]
+    | tuple[Literal["line"], float, float, float, float]
+    | tuple[Literal["arc"], float, float, float, int, int]
+    | tuple[Literal["square", "circle"], float, float, float, Literal["fill", "ring"]]
+    # Polygons are only triangles (3 vertices) and diamonds (4) — kept
+    # as concrete arities so mypy can narrow the draw loop's `match`.
+    | tuple[Literal["poly"], float, float, float, Literal["fill", "ring"],
+            float, float, float, float, float, float]
+    | tuple[Literal["poly"], float, float, float, Literal["fill", "ring"],
+            float, float, float, float, float, float, float, float]
+)
+
+#: Vector-drawn glyphs — codepoint → cell-relative primitives. The font
+#: is only used where it is good; these glyphs are painted directly so
+#: adjacent cells join seamlessly (box/block), and so tiny geometric
+#: shapes (spinner dots, bullets) survive antialiasing instead of
+#: washing out to a speck. One table, one draw path — no per-glyph
+#: exceptions.
+#:
+#: Primitive kinds (geometry is cell-relative unless noted; `u` is the
+#: cell's smaller side, so shapes stay square on tall fonts):
+#:
+#: - `("fill", fx, fy, fw, fh, role)` — a fillRect. `role` is "fg" or
+#:   "bg": blocks paint their unlit quadrants with the cell background
+#:   so the lit quadrants tile the cell without seams.
+#: - `("line", x1, y1, x2, y2)` — a stroke (fg), cell-relative
+#:   coordinates, endpoints inclusive (box arms reach the cell edges).
+#: - `("arc", cx, cy, r, a0, a1)` — an arc (fg), radius `r × u`,
+#:   angles in degrees (rounded box corners).
+#: - `("square", size, cx, cy, style)` / `("circle", size, cx, cy,
+#:   style)` — a centered shape of side/diameter `size × u`, offset by
+#:   `cx × u` / `cy × u`. `style` is "fill" or "ring" (outline).
+#: - `("poly", size, cx, cy, style, vx1, vy1, ...)` — a polygon
+#:   (diamond/triangle), vertex coordinates in the `size × u` box,
+#:   centered like the shapes.
+def _poly_prim(size: float, style: Literal["fill", "ring"], *verts: float) -> _Primitive:
+    """A centered polygon primitive (diamond/triangle) — built through a
+    helper because mypy cannot distribute a literal union over the
+    variadic tuple inside a dict literal (the arity is unknown until
+    the call; the runtime shape is exercised by the render tests)."""
+    return cast(_Primitive, ("poly", size, 0.0, 0.0, style, *verts))
+
+
+_VECTOR_GLYPHS: dict[int, tuple[_Primitive, ...]] = {
+    # -- Box drawing (U+2500–257F): strokes reach the cell edges so
+    #    adjacent cells join without font gaps.
+    0x2500: (("line", 0.0, 0.5, 1.0, 0.5),),  # ─
+    0x2502: (("line", 0.5, 0.0, 0.5, 1.0),),  # │
+    0x250C: (("line", 0.5, 0.5, 1.0, 0.5), ("line", 0.5, 0.5, 0.5, 1.0)),  # ┌
+    0x2510: (("line", 0.0, 0.5, 0.5, 0.5), ("line", 0.5, 0.5, 0.5, 1.0)),  # ┐
+    0x2514: (("line", 0.5, 0.5, 1.0, 0.5), ("line", 0.5, 0.5, 0.5, 0.0)),  # └
+    0x2518: (("line", 0.0, 0.5, 0.5, 0.5), ("line", 0.5, 0.5, 0.5, 0.0)),  # ┘
+    0x251C: (("line", 0.5, 0.0, 0.5, 1.0), ("line", 0.5, 0.5, 1.0, 0.5)),  # ├
+    0x2524: (("line", 0.5, 0.0, 0.5, 1.0), ("line", 0.0, 0.5, 0.5, 0.5)),  # ┤
+    0x252C: (("line", 0.0, 0.5, 1.0, 0.5), ("line", 0.5, 0.5, 0.5, 1.0)),  # ┬
+    0x2534: (("line", 0.0, 0.5, 1.0, 0.5), ("line", 0.5, 0.5, 0.5, 0.0)),  # ┴
+    0x253C: (("line", 0.0, 0.5, 1.0, 0.5), ("line", 0.5, 0.0, 0.5, 1.0)),  # ┼
+    # Rounded corners: an arc in the cell center plus two legs — each
+    # corner reaches its own cell edges (╭ the top and left edges, etc.;
+    # the pre-table code had all four rotated 180°).
+    0x256D: (("arc", 0.5, 0.5, 0.25, 90, 90), ("line", 0.0, 0.5, 0.25, 0.5),
+             ("line", 0.5, 0.0, 0.5, 0.25)),  # ╭ top-left
+    0x256E: (("arc", 0.5, 0.5, 0.25, 90, -90), ("line", 0.75, 0.5, 1.0, 0.5),
+             ("line", 0.5, 0.0, 0.5, 0.25)),  # ╮ top-right
+    0x256F: (("arc", 0.5, 0.5, 0.25, 180, -90), ("line", 0.0, 0.5, 0.25, 0.5),
+             ("line", 0.5, 0.75, 0.5, 1.0)),  # ╯ bottom-left
+    0x2570: (("arc", 0.5, 0.5, 0.25, 0, -90), ("line", 0.75, 0.5, 1.0, 0.5),
+             ("line", 0.5, 0.75, 0.5, 1.0)),  # ╰ bottom-right
+    # -- Block characters (U+2580–259F): the whole cell in the
+    #    background, the lit quadrants in the foreground — adjacent
+    #    cells tile without seams.
+    0x2588: (("fill", 0.0, 0.0, 1.0, 1.0, "bg"), ("fill", 0.0, 0.0, 1.0, 1.0, "fg")),  # █
+    0x258C: (("fill", 0.0, 0.0, 1.0, 1.0, "bg"), ("fill", 0.0, 0.0, 0.5, 1.0, "fg")),  # ▌
+    0x2590: (("fill", 0.0, 0.0, 1.0, 1.0, "bg"), ("fill", 0.5, 0.0, 0.5, 1.0, "fg")),  # ▐
+    0x2580: (("fill", 0.0, 0.0, 1.0, 1.0, "bg"), ("fill", 0.0, 0.0, 1.0, 0.5, "fg")),  # ▀
+    0x2584: (("fill", 0.0, 0.0, 1.0, 1.0, "bg"), ("fill", 0.0, 0.5, 1.0, 0.5, "fg")),  # ▄
+    0x259D: (("fill", 0.0, 0.0, 1.0, 1.0, "bg"), ("fill", 0.5, 0.0, 0.5, 0.5, "fg")),  # ▝
+    0x2598: (("fill", 0.0, 0.0, 1.0, 1.0, "bg"), ("fill", 0.0, 0.0, 0.5, 0.5, "fg")),  # ▘
+    0x2596: (("fill", 0.0, 0.0, 1.0, 1.0, "bg"), ("fill", 0.0, 0.5, 0.5, 0.5, "fg")),  # ▖
+    0x2597: (("fill", 0.0, 0.0, 1.0, 1.0, "bg"), ("fill", 0.5, 0.5, 0.5, 0.5, "fg")),  # ▗
+    0x259B: (("fill", 0.0, 0.0, 1.0, 1.0, "bg"), ("fill", 0.0, 0.0, 1.0, 0.5, "fg"),
+             ("fill", 0.0, 0.5, 0.5, 0.5, "fg")),  # ▛
+    0x259C: (("fill", 0.0, 0.0, 1.0, 1.0, "bg"), ("fill", 0.0, 0.0, 1.0, 0.5, "fg"),
+             ("fill", 0.5, 0.5, 0.5, 0.5, "fg")),  # ▜
+    0x2599: (("fill", 0.0, 0.0, 1.0, 1.0, "bg"), ("fill", 0.0, 0.0, 0.5, 0.5, "fg"),
+             ("fill", 0.0, 0.5, 1.0, 0.5, "fg")),  # ▙
+    0x259F: (("fill", 0.0, 0.0, 1.0, 1.0, "bg"), ("fill", 0.5, 0.0, 0.5, 0.5, "fg"),
+             ("fill", 0.0, 0.5, 1.0, 0.5, "fg")),  # ▟
+    0x259A: (("fill", 0.0, 0.0, 1.0, 1.0, "bg"), ("fill", 0.0, 0.0, 0.5, 0.5, "fg"),
+             ("fill", 0.5, 0.5, 0.5, 0.5, "fg")),  # ▚
+    0x259E: (("fill", 0.0, 0.0, 1.0, 1.0, "bg"), ("fill", 0.5, 0.0, 0.5, 0.5, "fg"),
+             ("fill", 0.0, 0.5, 0.5, 0.5, "fg")),  # ▞
+    # -- Geometric shapes: centered, scaled by the cell's smaller side
+    #    so they stay square on tall fonts; the font glyphs for the
+    #    small ones are a few pixels and antialias to a speck (TUI
+    #    spinner dots, bullets, list markers).
+    0x2B1D: (("square", 0.30, 0.0, 0.0, "fill"),),  # ⬝ very small square
+    0x25AA: (("square", 0.35, 0.0, 0.0, "fill"),),  # ▪ small square
+    0x25AB: (("square", 0.35, 0.0, 0.0, "ring"),),  # ▫ white small square
+    0x25FC: (("square", 0.50, 0.0, 0.0, "fill"),),  # ◼ medium square
+    0x25FB: (("square", 0.50, 0.0, 0.0, "ring"),),  # ◻ white medium square
+    0x25A0: (("square", 0.80, 0.0, 0.0, "fill"),),  # ■
+    0x25A1: (("square", 0.80, 0.0, 0.0, "ring"),),  # □
+    0x2B1B: (("square", 0.90, 0.0, 0.0, "fill"),),  # ⬛ large square
+    0x2B1C: (("square", 0.90, 0.0, 0.0, "ring"),),  # ⬜ white large square
+    0x25CF: (("circle", 0.55, 0.0, 0.0, "fill"),),  # ●
+    0x25CB: (("circle", 0.55, 0.0, 0.0, "ring"),),  # ○
+    0x2B24: (("circle", 0.75, 0.0, 0.0, "fill"),),  # ⬤ large circle
+    0x2022: (("circle", 0.40, 0.0, 0.0, "fill"),),  # • bullet
+    0x00B7: (("circle", 0.30, 0.0, 0.0, "fill"),),  # · middle dot
+    0x25C6: (_poly_prim(0.60, "fill", 0.5, 0.0, 1.0, 0.5, 0.5, 1.0, 0.0, 0.5),),  # ◆
+    0x25C7: (_poly_prim(0.60, "ring", 0.5, 0.0, 1.0, 0.5, 0.5, 1.0, 0.0, 0.5),),  # ◇
+    0x2B25: (_poly_prim(0.45, "fill", 0.5, 0.0, 1.0, 0.5, 0.5, 1.0, 0.0, 0.5),),  # ⬥
+    0x2B29: (_poly_prim(0.35, "fill", 0.5, 0.0, 1.0, 0.5, 0.5, 1.0, 0.0, 0.5),),  # ⬩
+    0x25B2: (_poly_prim(0.70, "fill", 0.5, 0.0, 1.0, 1.0, 0.0, 1.0),),  # ▲
+    0x25BC: (_poly_prim(0.70, "fill", 0.5, 1.0, 1.0, 0.0, 0.0, 0.0),),  # ▼
+    0x25C0: (_poly_prim(0.70, "fill", 0.0, 0.5, 1.0, 0.0, 1.0, 1.0),),  # ◀
+    0x25B6: (_poly_prim(0.70, "fill", 1.0, 0.5, 0.0, 0.0, 0.0, 1.0),),  # ▶
+    0x25B3: (_poly_prim(0.70, "ring", 0.5, 0.0, 1.0, 1.0, 0.0, 1.0),),  # △
+    0x25BD: (_poly_prim(0.70, "ring", 0.5, 1.0, 1.0, 0.0, 0.0, 0.0),),  # ▽
+    0x25C1: (_poly_prim(0.70, "ring", 0.0, 0.5, 1.0, 0.0, 1.0, 1.0),),  # ◁
+    0x25B7: (_poly_prim(0.70, "ring", 1.0, 0.5, 0.0, 0.0, 0.0, 1.0),),  # ▷
 }
+
+#: Braille (U+2800–28FF) is intentionally NOT vector-drawn: the font
+#: glyphs carry the correct Unicode dot layout (the six-dots-circling
+#: spinner frames ⠋⠙⠹…), and at terminal sizes the pattern reads
+#: better from the font than from a vector approximation. Vector
+#: drawing covers box/block glyphs (seamless joins) and small
+#: geometric shapes (which the font renders as barely-visible
+#: specks); braille is none of those.
+
+#: Every vector-drawn codepoint — the single classification set for
+#: both render paths (the Cython collector gets it from the renderer).
+_VECTOR_CODES = frozenset(_VECTOR_GLYPHS)
 
 
 #: drawText alignment — a module constant: per-cell `|` on the enums
@@ -73,24 +206,6 @@ _TEXT_FLAGS = Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
 CURSOR_BLOCK = "block"
 CURSOR_OUTLINE = "outline"
 
-#: Box-drawing segment tables as cell-relative half-units — hoisted out
-#: of the per-cell call (a `ls` box row hits these on every cell) while
-#: reproducing the original absolute geometry exactly: a coordinate `u`
-#: maps to `x + u * w / 2` (so 0 → x, 1 → the center, 2 → x + w).
-_BOX_SEGS = {
-    0x2500: ((0, 1, 2, 1),),  # ─
-    0x2502: ((1, 0, 1, 2),),  # │
-    0x250C: ((1, 1, 2, 1), (1, 1, 1, 2)),  # ┌
-    0x2510: ((0, 1, 1, 1), (1, 1, 1, 2)),  # ┐
-    0x2514: ((1, 1, 2, 1), (1, 1, 1, 0)),  # └ — right + up
-    0x2518: ((0, 1, 1, 1), (1, 1, 1, 0)),  # ┘ — left + up
-    0x251C: ((1, 0, 1, 2), (1, 1, 2, 1)),  # ├
-    0x2524: ((1, 0, 1, 2), (0, 1, 1, 1)),  # ┤
-    0x252C: ((0, 1, 2, 1), (1, 1, 1, 2)),  # ┬
-    0x2534: ((0, 1, 2, 1), (1, 1, 1, 0)),  # ┴ — left + right + up
-    0x253C: ((0, 1, 2, 1), (1, 0, 1, 2)),  # ┼
-}
-
 
 #: Cap for the renderer color flyweight: the 256-palette entries fit
 #: comfortably, leaving headroom for arbitrary RGB ints — bounded like
@@ -102,6 +217,11 @@ _COLOR_CACHE_CAP = 4096
 class TerminalRenderer:
     """Paints `Snapshot.rows` into an image sized `lines × columns`
     cells. One-shot: call `render` with each arriving snapshot."""
+
+    #: The vector-glyph codepoints (`_VECTOR_CODES`) — the Cython run
+    #: collector reads it from the renderer instead of importing the
+    #: table (a circular import) or duplicating the codepoints.
+    _vector_codes = _VECTOR_CODES
 
     def __init__(self, font: QFont | None = None, *, antialias: bool = True) -> None:
         # Copy the font so a caller-provided QFont is never mutated.
@@ -455,17 +575,17 @@ class TerminalRenderer:
                 )
             cp = ord(cell.data[0]) if len(cell.data) == 1 else 0
             wide = col + 1 < n and cells[col + 1].data == ""
-            if 0x2500 <= cp <= 0x257F or 0x2580 <= cp <= 0x259F or wide:
-                # Box/block/wide chars break the run and draw individually.
+            if cp in _VECTOR_CODES or wide:
+                # Vector glyphs and wide chars break the run and draw
+                # individually (wide chars are text; vector glyphs are
+                # `_VECTOR_GLYPHS` primitives).
                 flush(col)
                 rect = QRectF(col * cw, y0, cw, ch)
                 if wide:
                     # A wide char: one glyph across two cells.
                     rect.setWidth(2 * cw)
-                if 0x2500 <= cp <= 0x257F:  # box-drawing, vector-drawn
-                    self._draw_box_drawing(painter, rect, cp, fg)
-                elif 0x2580 <= cp <= 0x259F:  # block characters, fillRects
-                    self._draw_block_char(painter, rect, cp, fg, bg)
+                if cp in _VECTOR_CODES:
+                    self._draw_vector_glyph(painter, rect, cp, fg, bg)
                 else:
                     painter.setFont(font_for(cell.bold, cell.italic))
                     painter.setPen(fg)
@@ -497,59 +617,90 @@ class TerminalRenderer:
                 run_text.append(cell.data)
         flush(n)
 
-    def _draw_box_drawing(self, painter: QPainter, rect: QRectF, cp: int, color: QColor) -> None:
-        """Box-drawing characters as painter.drawLine/drawArc — never the
-        font, whose glyphs leave seams between adjacent cells. Unknown
-        entries fall back to the font. `rect` is a float cell rect — the
-        lines land at fractional cell boundaries, so adjacent cells join
-        exactly (QPointF: PyQt6's int drawLine overload rejects floats)."""
-        painter.setPen(color)
-        x, y = rect.left(), rect.top()
-        w, h = rect.width(), rect.height()
-        cx, cy = x + w / 2, y + h / 2
-        segs = _BOX_SEGS.get(cp)
-        if segs is not None:
-            # `u` is a half-unit: 0 → x, 1 → center, 2 → x + w.
-            for sx, sy, ex, ey in segs:
-                painter.drawLine(
-                    QPointF(x + sx * w / 2, y + sy * h / 2),
-                    QPointF(x + ex * w / 2, y + ey * h / 2),
-                )
-            return
-        # Rounded corners ╭╮╯╰: an arc in the cell center + two legs
-        # (rare enough that the tables stay inline here).
-        r = min(w, h) / 4
-        arcs = {
-            0x256D: (0, -90, (cx + r, cy, x + w, cy), (cx, cy + r, cx, y + h)),  # ╭
-            0x256E: (180, -90, (x, cy, cx - r, cy), (cx, cy + r, cx, y + h)),  # ╮
-            0x256F: (90, 90, (x, cy, cx - r, cy), (cx, y, cx, cy - r)),  # ╯
-            0x2570: (0, 90, (cx + r, cy, x + w, cy), (cx, y, cx, cy - r)),  # ╰
-        }.get(cp)
-        if arcs is not None:
-            a0, a1, leg1, leg2 = arcs
-            painter.drawArc(
-                QRectF(cx - r, cy - r, 2 * r, 2 * r), a0 * 16, a1 * 16
-            )
-            painter.drawLine(QPointF(leg1[0], leg1[1]), QPointF(leg1[2], leg1[3]))
-            painter.drawLine(QPointF(leg2[0], leg2[1]), QPointF(leg2[2], leg2[3]))
-            return
-        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, chr(cp))
-
-    def _draw_block_char(
+    def _draw_vector_glyph(
         self, painter: QPainter, rect: QRectF, cp: int, fg: QColor, bg: QColor
     ) -> None:
-        """Block characters (U+2580–259F) as quadrant fillRects — the
-        font version leaves gaps where adjacent cells should join
-        seamlessly."""
+        """Paint a vector glyph's primitives (see `_VECTOR_GLYPHS`) —
+        the single draw path for every non-font glyph: box-drawing
+        strokes, block quadrant fills, and the centered geometric
+        shapes. `fg`/`bg` are the cell's rendered
+        colors (reverse/selection/dim already applied). `rect` is a
+        float cell rect — strokes land at fractional cell boundaries,
+        so adjacent cells join exactly (QPointF: PyQt6's int drawLine
+        overload rejects floats)."""
         x, y = rect.left(), rect.top()
         w, h = rect.width(), rect.height()
-        painter.fillRect(rect, bg)  # the unlit quadrants
-        fills = _BLOCK_FILLS.get(cp)
-        if fills is not None:
-            for fx, fy, fw, fh in fills:
-                painter.fillRect(QRectF(x + fx * w, y + fy * h, fw * w, fh * h), fg)
+        u = min(w, h)
+        prims = _VECTOR_GLYPHS.get(cp)
+        if prims is None:
+            # Classified as vector by a dense range (the Cython path
+            # checks 0x2500–0x259F in C) but absent from the table —
+            # the heavy/double/dashed box variants. The font draws
+            # them, like the pre-table fallback.
+            painter.setPen(fg)
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, chr(cp))
             return
-        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, chr(cp))
+        for prim in prims:
+            match prim:
+                case ("fill", fx, fy, fw, fh, role):
+                    painter.fillRect(
+                        QRectF(x + fx * w, y + fy * h, fw * w, fh * h),
+                        fg if role == "fg" else bg,
+                    )
+                case ("line", x1, y1, x2, y2):
+                    painter.setPen(fg)
+                    painter.drawLine(
+                        QPointF(x + x1 * w, y + y1 * h),
+                        QPointF(x + x2 * w, y + y2 * h),
+                    )
+                case ("arc", cx, cy, r, a0, a1):
+                    painter.setPen(fg)
+                    r = r * u
+                    painter.drawArc(
+                        QRectF(x + cx * w - r, y + cy * h - r, 2 * r, 2 * r),
+                        a0 * 16, a1 * 16,
+                    )
+                case ("square" | "circle", size, sx, sy, style):
+                    side = size * u
+                    qrect = QRectF(
+                        x + w / 2 + sx * u - side / 2,
+                        y + h / 2 + sy * u - side / 2,
+                        side,
+                        side,
+                    )
+                    if style == "fill":
+                        if prim[0] == "square":
+                            painter.fillRect(qrect, fg)
+                        else:
+                            painter.setPen(Qt.PenStyle.NoPen)
+                            painter.setBrush(fg)
+                            painter.drawEllipse(qrect)
+                    else:  # ring: an outline, the cell background shows through
+                        painter.setPen(fg)
+                        painter.setBrush(Qt.BrushStyle.NoBrush)
+                        if prim[0] == "square":
+                            painter.drawRect(qrect)
+                        else:
+                            painter.drawEllipse(qrect)
+                case ("poly", size, sx, sy, style, *verts):
+                    side = size * u
+                    cx = x + w / 2 + sx * u
+                    cy = y + h / 2 + sy * u
+                    pts = QPolygonF()
+                    for i in range(0, len(verts), 2):
+                        pts.append(
+                            QPointF(
+                                cx + (verts[i] - 0.5) * side,
+                                cy + (verts[i + 1] - 0.5) * side,
+                            )
+                        )
+                    if style == "fill":
+                        painter.setPen(Qt.PenStyle.NoPen)
+                        painter.setBrush(fg)
+                    else:  # ring: an outline, the cell background shows through
+                        painter.setPen(fg)
+                        painter.setBrush(Qt.BrushStyle.NoBrush)
+                    painter.drawPolygon(pts)
 
     def _paint_cursor(
         self,
