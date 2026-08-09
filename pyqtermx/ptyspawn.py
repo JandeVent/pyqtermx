@@ -23,6 +23,7 @@ import struct
 import sys
 import termios
 import time
+from pathlib import Path
 from typing import Mapping, Sequence
 
 #: The terminal type the child sees (spec: TUIs behave differently
@@ -205,13 +206,41 @@ class Pty:
         Note: a stopped job (Ctrl-Z) returns the foreground group to
         the shell, so this reports False for stopped jobs — a full
         job-table check would need the shell's job state."""
+        return self._foreground_pgid() is not None
+
+    def foreground_program(self) -> str | None:
+        """The name of the process that currently owns the terminal's
+        foreground process group — `vim`, `sleep`, `node`, ….
+
+        Complements `has_foreground_job()`: that answers *whether* a
+        job is running, this answers *what* it is. Returns None when
+        the shell is idle at its prompt (no job), when the child has
+        exited, or on platforms where the process name cannot be
+        resolved (Windows — no POSIX job control).
+
+        Resolution is platform-specific: Linux reads
+        ``/proc/<pgid>/comm``; macOS asks libproc for the process's
+        executable path and takes its basename. Stopped jobs (Ctrl-Z)
+        report None, mirroring `has_foreground_job()`."""
+        pgid = self._foreground_pgid()
+        if pgid is None:
+            return None
+        return _process_name(pgid)
+
+    def _foreground_pgid(self) -> int | None:
+        """The terminal's foreground process-group id, or None when the
+        shell is idle at its prompt, the child has exited, or the pty
+        is gone — the shared guard behind `has_foreground_job()` and
+        `foreground_program()`."""
         if not self.is_running():
-            return False
+            return None
         try:
             foreground_pgid = os.tcgetpgrp(self._master_fd)
         except (OSError, ValueError):
-            return False
-        return foreground_pgid != self.pid
+            return None
+        if foreground_pgid == self.pid:
+            return None  # idle at the prompt: the shell owns the terminal
+        return foreground_pgid
 
     def wait(self) -> int | None:
         """Reap the child (WNOHANG): its exit status, or None while it
@@ -253,3 +282,39 @@ class Pty:
         deadline = time.monotonic() + timeout
         while self.is_running() and time.monotonic() < deadline:
             time.sleep(0.01)
+
+
+def _process_name(pid: int) -> str | None:
+    """The name of the process with the given pid, or None when it
+    cannot be resolved (process gone, unsupported platform).
+
+    Linux: ``/proc/<pid>/comm`` (a single file read, no subprocess).
+    macOS: libproc's ``proc_pidpath`` via ctypes (no subprocess).
+    Other platforms: None (Windows has no POSIX process table here).
+    """
+    if sys.platform.startswith("linux"):
+        try:
+            return Path(f"/proc/{pid}/comm").read_text().strip() or None
+        except OSError:
+            return None
+    if sys.platform == "darwin":
+        return _darwin_process_name(pid)
+    return None
+
+
+def _darwin_process_name(pid: int) -> str | None:
+    """The executable basename of `pid` via libproc's proc_pidpath."""
+    try:
+        import ctypes
+
+        libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
+        proc_pidpath = libproc.proc_pidpath
+        proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+        proc_pidpath.restype = ctypes.c_int
+        buf = ctypes.create_string_buffer(4096)
+        n = proc_pidpath(pid, buf, len(buf))
+        if n <= 0:
+            return None
+        return Path(buf.raw[:n].decode("utf-8", "replace")).name or None
+    except (OSError, AttributeError, TypeError):
+        return None

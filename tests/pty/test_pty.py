@@ -242,6 +242,59 @@ def test_has_foreground_job_true_while_job_runs() -> None:
         pty.close()
 
 
+def test_foreground_program_none_at_idle_prompt() -> None:
+    """No foreground program at the idle prompt — the shell owns the
+    terminal, so the panel shows no program name."""
+    pty = spawn_child(
+        "import os, sys\n"
+        "print('IDLE', flush=True)\n"
+        "sys.stdin.readline()\n"
+        "print('DONE', flush=True)\n"
+    )
+    try:
+        read_until(pty, b"IDLE")
+        assert pty.foreground_program() is None
+    finally:
+        pty.close()
+
+
+def test_foreground_program_reports_job_name_while_running() -> None:
+    """A foreground job is reported by its program name — the panel
+    shows 'sleep' while the job runs (mirrors has_foreground_job)."""
+    pty = spawn_child(
+        "import os, sys\n"
+        "print('IDLE', flush=True)\n"
+        "sys.stdin.readline()\n"
+        "pid = os.fork()\n"
+        "if pid == 0:\n"
+        "    os.setpgid(0, 0)\n"
+        "    os.execv('/bin/sleep', ['sleep', '30'])\n"
+        "os.setpgid(pid, pid)\n"
+        "os.tcsetpgrp(0, pid)\n"  # the shell foregrounds the job
+        "os.waitpid(pid, 0)\n"
+        "print('DONE', flush=True)\n"
+    )
+    try:
+        read_until(pty, b"IDLE")
+        assert pty.foreground_program() is None
+        pty.send_data(b"go\n")
+        # the foreground job is now /bin/sleep — resolved by name
+        assert wait_for(lambda: pty.foreground_program() == 'sleep')
+    finally:
+        pty.close()
+
+
+def test_foreground_program_none_after_child_exits() -> None:
+    """After the child exits there is no foreground program — the row
+    is dimmed as exited instead."""
+    pty = spawn_child("print('BYE', flush=True)\n")
+    try:
+        read_until(pty, b"BYE")
+        assert pty.foreground_program() is None
+    finally:
+        pty.close()
+
+
 def test_close_sigkills_a_stubborn_child() -> None:
     # The child ignores EOF/SIGHUP/SIGTERM — only the SIGKILL fallback
     # can stop it (bounded waits, so the test stays fast).
