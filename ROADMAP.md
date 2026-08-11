@@ -91,12 +91,13 @@ Programs *ask* the terminal things; the terminal replies. Needs the PTY from Pha
 | `8` | hyperlinks (`8;;URI` … text … `8;;`) | ★★★★★ |
 | `52` | clipboard (`52;c;base64`) — SSH must-have | ★★★★★ |
 | `7` | cwd sync (`7;file://host/path`) | ★★★★ |
-| `4` / `10` / `11` | palette / fg / bg color | ★★★★ |
+| `4` / `10` / `11` | palette / fg / bg color queries — ✅; the set forms (palette mutation) remain | ★★★★ |
+| `12` / `112` | cursor color — set/query ✅ (the renderer paints the block in it); `112` resets to the default inverted block | ★★★★ |
 | `133` | shell integration (prompt/command markers) | ★★★★ |
 | `633` | VS Code shell integration | ★★★ |
 | `9` / `9;9` | notification / WSL cwd | ★★★ |
 
-Notes: OSC 8 `params` may be empty — `8;;URI` is the common form; OSC 52 is pure base64 (no escaping needed); the terminator used (BEL vs ST) is invisible to the dispatcher.
+Notes: OSC 8 `params` may be empty — `8;;URI` is the common form; OSC 52 is pure base64 (no escaping needed); the terminator used (BEL vs ST) is invisible to the dispatcher. The color queries (`4;?`, `4;i;?`, `10;?`, `11;?`) reply BEL-terminated with the xterm 16-bit `rgb:RRRR/GGGG/BBBB` form, sourced from `pyqtermx/palette.py` — the single source of truth shared with the GUI renderer, so a themed terminal reports its themed colors. Set forms (`4;i;spec`, `10;spec`, `11;spec`) parse-and-ignore until palette mutation lands. OSC 12 (`12;#rrggbb` / `12;rgb:RRRR/GGGG/BBBB`) applies the app's cursor color, `12;?` reports it back, and `112` resets it.
 **Milestone:** `printf '\033]0;hi\007'` sets the window title.
 
 - Interactive input: mouse (1000/1003/1006 SGR), bracketed paste (2004), focus reporting — then **run `vttest`** (the canonical conformance suite).

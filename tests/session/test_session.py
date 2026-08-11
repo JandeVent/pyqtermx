@@ -371,3 +371,90 @@ def test_mouse_modes_default_to_off() -> None:
         assert not snap.mouse_1003 and not snap.mouse_1006
     finally:
         session.close()
+
+
+# -- OSC color queries (Phase 5) ----------------------------------------
+
+
+def test_osc_query_reply_reaches_child() -> None:
+    """The emulator answers the child's color query through the pty —
+    the detection path TUI apps rely on for light/dark theme."""
+    fake = FakePty()
+    session = make_session(fake)
+    try:
+        fake.output(b"\x1b]11;?\x07")
+        assert wait_for(lambda: fake.sent == b"\x1b]11;rgb:1010/1010/1010\x07")
+    finally:
+        session.close()
+
+
+def test_set_palette_command_updates_color_replies() -> None:
+    """`set_palette` (posted like every command) makes queries report
+    the themed colors — a light-theme app must not answer "dark"."""
+    fake = FakePty()
+    session = make_session(fake)
+    try:
+        session.set_palette("#ffffff", "#000000")
+        session.send_data(b"\x00")  # marker — queued after set_palette
+        # The palette command is applied before the marker is written
+        # (queue order), so once the marker lands the new colors are in.
+        assert wait_for(lambda: b"\x00" in fake.sent)
+        fake.output(b"\x1b]10;?\x07\x1b]11;?\x07")
+        assert wait_for(
+            lambda: fake.sent
+            == b"\x00\x1b]10;rgb:ffff/ffff/ffff\x07\x1b]11;rgb:0000/0000/0000\x07"
+        )
+    finally:
+        session.close()
+
+
+def test_osc12_cursor_color_flows_into_snapshots() -> None:
+    """OSC 12 from the child lands in snapshots as `cursor_color` — the
+    renderer's block color (visible state, like DECTCEM). The change
+    repaints the cursor row without touching text (selection survives)."""
+    fake = FakePty()
+    snapshots: list[Snapshot] = []
+    session = make_session(fake, snapshot_callback=snapshots.append)
+    try:
+        fake.output(b"x\x1b]12;#1a1a1a\x07")
+        assert wait_for(lambda: snapshots and snapshots[-1].cursor_color == "#1a1a1a")
+        assert snapshots[-1].content_changed is True  # the "x" changed text
+        assert snapshots[-1].cursor == (0, 1)  # cursor rides the "x"
+        fake.output(b"\x1b]12;#ffffff\x07")
+        assert wait_for(lambda: snapshots and snapshots[-1].cursor_color == "#ffffff")
+        # The color-only change repaints the cursor row: dirty rows
+        # carry it, text stays untouched.
+        assert snapshots[-1].content_changed is False
+        assert snapshots[-1].cursor == (0, 1)
+        fake.output(b"\x1b]112\x07")
+        assert wait_for(lambda: snapshots and snapshots[-1].cursor_color is None)
+    finally:
+        session.close()
+
+
+def test_osc_color_query_answered_through_real_pty() -> None:
+    """A real child queries its background and reads the reply — the
+    whole path: child → pty → parser → emulator → reply → pty → child.
+    The reply is hex-encoded on screen: raw OSC bytes would be parsed
+    by the emulator, not rendered as text."""
+    child = (
+        "import os, sys, termios, tty\n"
+        "tty.setraw(0)\n"
+        "os.write(1, b'\\x1b]11;?\\x07')\n"
+        "reply = b''\n"
+        "while not reply.endswith(b'\\x07'):\n"
+        "    chunk = os.read(0, 64)\n"
+        "    if not chunk:\n"
+        "        break\n"
+        "    reply += chunk\n"
+        "os.write(1, b'\\nREPLY:' + reply.hex().encode() + b'\\n')\n"
+    )
+    pty = Pty([sys.executable, "-c", child])
+    session = make_session(pty)
+    try:
+        assert wait_for(
+            lambda: "REPLY:1b5d31313b7267623a313031302f313031302f3130313007"
+            in session.screen.render()
+        )
+    finally:
+        session.close()

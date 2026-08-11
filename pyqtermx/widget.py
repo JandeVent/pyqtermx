@@ -294,8 +294,15 @@ class TerminalMixin(_QtBase):
 
     def set_palette(self, fg: QColor, bg: QColor) -> None:
         """Replace the terminal's default colors and repaint the last
-        snapshot with them."""
+        snapshot with them. The emulator is told too, so OSC 10/11
+        color queries (TUI theme detection) report the themed colors —
+        a light-theme app embedding a terminal must not answer "dark"
+        to the child's background query."""
         self._renderer.set_palette(fg, bg)
+        if self._session is not None:
+            self._session.set_palette(
+                fg.name(QColor.NameFormat.HexRgb), bg.name(QColor.NameFormat.HexRgb)
+            )
         self._refresh()
 
     def _on_session_snapshot(self, snapshot: Snapshot) -> None:

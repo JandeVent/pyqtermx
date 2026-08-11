@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Callable
 
 from .dispatcher import Dispatcher
+from .palette import DEFAULT_BG_RGB, DEFAULT_FG_RGB, palette_rgb, rgb_hex
 from .params import Params
 from .screen import rgb
 
@@ -35,6 +36,18 @@ def _rgb_param(params: Params, start: int) -> int:
         _rgb_component(params.get(start + 1)),
         _rgb_component(params.get(start + 2)),
     )
+
+
+def _osc_rgb(color: str) -> str:
+    """`#rrggbb` → the xterm reply form `rgb:RRRR/GGGG/BBBB` (16-bit
+    components — each 8-bit value doubled). A malformed color falls
+    back to black rather than raising inside the reader thread."""
+    if len(color) != 7 or not color.startswith("#"):
+        return "rgb:0000/0000/0000"
+    r = int(color[1:3], 16)
+    g = int(color[3:5], 16)
+    b = int(color[5:7], 16)
+    return f"rgb:{r * 0x101:04x}/{g * 0x101:04x}/{b * 0x101:04x}"
 
 
 class Emulator(Dispatcher):
@@ -96,8 +109,30 @@ class Emulator(Dispatcher):
         ("#", "8"): "_decaln",  # DECALN — screen alignment test
     }
 
-    def __init__(self, screen: "Screen") -> None:
+    def __init__(
+        self,
+        screen: "Screen",
+        *,
+        reply: Callable[[str], None] | None = None,
+    ) -> None:
+        """`reply`, when given, receives OSC query replies (BEL-
+        terminated, xterm style) — the session wires it to the pty so
+        the child sees its own terminal's colors."""
         self.screen = screen
+        self._reply = reply
+        self._default_fg = rgb_hex(*DEFAULT_FG_RGB)
+        self._default_bg = rgb_hex(*DEFAULT_BG_RGB)
+        self._palette = tuple(rgb_hex(*palette_rgb(index)) for index in range(256))
+        #: OSC 12 — the cursor color (`#rrggbb`), None for the default
+        #: inverted block (visible state: snapshots carry it).
+        self._cursor_color: str | None = None
+
+    def set_palette(self, fg: str, bg: str) -> None:
+        """Replace the default foreground/background reported to OSC
+        10/11 color queries (hex `#rrggbb` — the `QColor.name(HexRgb)`
+        form the widget forwards)."""
+        self._default_fg = fg
+        self._default_bg = bg
 
     def chars(self, text: str) -> None:
         self.screen.print(text)
@@ -432,4 +467,83 @@ class Emulator(Dispatcher):
         self.screen.designate_charset(designator, charset)
 
     def osc_dispatch(self, payload: str) -> None:
-        return None
+        """OSC dispatch — split on `;`, dispatch on the first field.
+
+        Phase 5, color queries: `4` (palette), `10` (fg), `11` (bg),
+        `12` (cursor) — the queries TUI apps (opencode, vim, …) send
+        to detect the terminal's theme and pick their own cursor
+        color. Set forms (`4;i;spec`, `10;spec`, `11;spec`) parse-and-
+        ignore for now (palette mutation is a follow-up); `12;spec`
+        and `112` (reset) apply — the cursor color is visible state.
+        Everything else stays a no-op until its step."""
+        fields = payload.split(";")
+        command = fields[0]
+        if command == "4":
+            self._osc_color_query(fields)
+        elif command in ("10", "11") and len(fields) >= 2 and fields[1] == "?":
+            color = self._default_fg if command == "10" else self._default_bg
+            self._osc_reply(f"{command};{_osc_rgb(color)}")
+        elif command == "12":
+            self._osc_cursor_color(fields)
+        elif command == "112":
+            # OSC 112 — reset the cursor color to the terminal default.
+            self._cursor_color = None
+
+    def _osc_cursor_color(self, fields: list[str]) -> None:
+        """OSC 12 — the cursor color, set or query. Set forms
+        (`12;#rrggbb`, `12;rgb:rrrr/gggg/bbbb`) replace the color the
+        renderer paints the cursor block with — apps (opencode, vim)
+        set their own per-theme caret color, and honoring it keeps the
+        block visible in light themes (where the default inverted
+        block would take the cell's white foreground). `12;?` reports
+        the current color back (xterm style); unset stays silent."""
+        if len(fields) >= 2 and fields[1] == "?":
+            if self._cursor_color is not None:
+                self._osc_reply(f"12;{_osc_rgb(self._cursor_color)}")
+            return
+        if len(fields) < 2:
+            return
+        spec = fields[1]
+        if len(spec) == 7 and spec.startswith("#"):
+            self._cursor_color = spec
+        elif spec.startswith("rgb:"):
+            # rgb:RRRR/GGGG/BBBB — 16-bit components, scaled to 8-bit.
+            # Any other arity (rgb:RRRR/GGGG, …) is malformed — ignore
+            # rather than store an unparsable `#rrggbb`.
+            parts = spec[4:].split("/")
+            if len(parts) == 3:
+                try:
+                    self._cursor_color = "#" + "".join(
+                        f"{int(p, 16) >> 8:02x}" for p in parts
+                    )
+                except ValueError:
+                    pass
+
+    @property
+    def cursor_color(self) -> str | None:
+        """The OSC 12 cursor color (`#rrggbb`), None for the default
+        inverted cursor — the session mirrors it into snapshots."""
+        return self._cursor_color
+
+    def _osc_color_query(self, fields: list[str]) -> None:
+        """OSC 4 query forms — `4;?` (all 16), `4;i;?` (one index),
+        `4;i1;?;i2;?` (several): reply each queried palette color.
+        Set forms carry no `?` — parse-and-ignore."""
+        if "?" not in fields:
+            return
+        indices = [int(field) for field in fields[1:] if field.isdigit()] or list(
+            range(16)
+        )
+        replies = [
+            f"{index};{_osc_rgb(self._palette[index])}"
+            for index in indices
+            if 0 <= index < 256
+        ]
+        if replies:
+            self._osc_reply(f"4;{';'.join(replies)}")
+
+    def _osc_reply(self, payload: str) -> None:
+        """Send an OSC reply to the child (BEL-terminated, xterm style);
+        a missing reply callback (headless tests) silently drops it."""
+        if self._reply is not None:
+            self._reply(f"\x1b]{payload}\x07")

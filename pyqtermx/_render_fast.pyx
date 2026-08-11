@@ -31,23 +31,22 @@ from PyQt6.QtCore import QRectF
 from .render import (
     DEFAULT_BG,
     DEFAULT_FG,
-    _CUBE_LEVELS,
-    _PALETTE,
     _TEXT_FLAGS,
 )
+from .palette import CUBE_LEVELS, PALETTE16
 
 #: The palette/cube copied into C arrays at import (the single source
-#: of truth stays in render.py) and the default colors as packed RGB
-#: for the SGR 2 dim mix (which resolves -1 to the default).
+#: of truth stays in render.py/palette.py) and the default colors as
+#: packed RGB for the SGR 2 dim mix (which resolves -1 to the default).
 cdef int[16] _PALETTE_C
 cdef int[6] _CUBE_C
 cdef int _DFLT_FG_RGB
 cdef int _DFLT_BG_RGB
 
 for _i in range(16):
-    _PALETTE_C[_i] = <int>_PALETTE[_i]
+    _PALETTE_C[_i] = <int>PALETTE16[_i]
 for _i in range(6):
-    _CUBE_C[_i] = <int>_CUBE_LEVELS[_i]
+    _CUBE_C[_i] = <int>CUBE_LEVELS[_i]
 _DFLT_FG_RGB = (DEFAULT_FG.red() << 16) | (DEFAULT_FG.green() << 8) | DEFAULT_FG.blue()
 _DFLT_BG_RGB = (DEFAULT_BG.red() << 16) | (DEFAULT_BG.green() << 8) | DEFAULT_BG.blue()
 

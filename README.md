@@ -76,7 +76,9 @@ info panel and the block-letter banner and box frame drawn as vectors
   and the snapshot's DECTCEM (`?25`) visibility always wins.
 - Theming: `set_font()` / `set_palette()` on both the renderer and the
   widget rebuild the backing and re-render the last snapshot — no
-  hardcoded defaults.
+  hardcoded defaults. The themed colors also drive the OSC 4/10/11
+  color queries, so TUI apps inside the terminal detect the real
+  light/dark theme.
 
 **Input**
 
@@ -109,6 +111,13 @@ info panel and the block-letter banner and box frame drawn as vectors
   flow through a command queue; state changes cross the thread
   boundary as immutable snapshots over queued signals — lock-free and
   race-free by construction.
+- OSC color queries (`4` palette, `10` fg, `11` bg): the emulator
+  answers the child's theme-detection queries with the current
+  palette/defaults (xterm `rgb:RRRR/GGGG/BBBB` form), driven by
+  `Session.set_palette()` / widget `set_palette()`. The cursor color
+  (`12` set/query, `112` reset) applies too: apps like opencode set
+  their own per-theme caret color, which keeps the block visible on
+  light themes.
 
 ## Performance
 
@@ -193,6 +202,7 @@ back; it never reads the model (ADR-0005).
 | `pyqtermx/dispatcher.py` | ① | The parser→emulator event protocol |
 | `pyqtermx/emulator.py` | ② | CSI/ESC dispatch tables; turns parse events into screen ops |
 | `pyqtermx/screen.py` | ② | The dumb model: cells, cursor, modes, scroll regions, alt screen, scrollback, viewport |
+| `pyqtermx/palette.py` | ② | Qt-free palette: the 16 ANSI colors, cube/grayscale, defaults — shared by the renderer and OSC 4/10/11 replies |
 | `pyqtermx/ptyspawn.py` | 0 | Qt-free PTY spawn: fork/setsid/winsize/lifecycle |
 | `pyqtermx/session.py` | glue | Reader thread, command queue, snapshot emission |
 | `pyqtermx/render.py` | ③ | Snapshot → pixels: glyphs, vector box/block chars, cursor |
@@ -211,10 +221,13 @@ xterm extensions strategy (see `ROADMAP.md`):
 | Phase 2 — text-mode CSI | done |
 | Phase 3 — full-screen apps & color | done |
 | Phase 4 — PTY, scrollback, GUI | done (a real shell you can type into) |
-| Phase 5 — dialogue & conformance | next: DA/DSR queries, OSC dispatch (title, hyperlinks, clipboard), mouse tracking, `vttest` |
+| Phase 5 — dialogue & conformance | in progress: OSC color queries (4/10/11) and cursor color (12/112) done; title, hyperlinks, clipboard, DA/DSR queries, mouse tracking, `vttest` next |
 
-OSC payloads are collected by the parser today; dispatch lands in
-Phase 5.
+OSC payloads are collected by the parser and dispatched in
+`emulator.osc_dispatch()`: the color queries (4/10/11) answer TUI
+theme detection (driven by `set_palette`), and the cursor color
+(12/112) applies the app's caret color; the rest of the OSC family
+lands in Phase 5.
 
 ## Development
 

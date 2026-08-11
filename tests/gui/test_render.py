@@ -34,6 +34,7 @@ def snapshot(
     cursor: tuple[int, int] = (-1, 0),
     viewport_offset: int = 0,
     cursor_visible: bool = True,
+    cursor_color: str | None = None,
 ) -> Snapshot:
     return Snapshot(
         dirty_rows=tuple(range(len(rows))),
@@ -42,6 +43,7 @@ def snapshot(
         viewport_offset=viewport_offset,
         cursor=cursor,
         cursor_visible=cursor_visible,
+        cursor_color=cursor_color,
     )
 
 
@@ -242,6 +244,48 @@ def test_cursor_inverts_default_character(renderer: TerminalRenderer) -> None:
     renderer.render(img, snapshot([make_row(Cell("M"))], cursor=(0, 0)), rows=[make_row(Cell("M"))])
     assert cell_has_color(img, renderer, 0, DEFAULT_FG)  # the block
     assert cell_has_color(img, renderer, 0, DEFAULT_BG)  # the glyph
+
+
+def test_cursor_block_uses_osc12_color(renderer: TerminalRenderer) -> None:
+    # OSC 12 (opencode, vim set the caret color per theme): the block
+    # is the app's color — a dark caret on a light theme — not the
+    # cell's foreground (which apps paint white on their own
+    # backgrounds), and the glyph contrasts with it by luminance.
+    img = QImage(round(1 * renderer.cell_w), renderer.cell_h, QImage.Format.Format_RGB32)
+    img.fill(Qt.GlobalColor.black)
+    renderer.render(
+        img,
+        snapshot([make_row(Cell("M"))], cursor=(0, 0), cursor_color="#1a1a1a"),
+        rows=[make_row(Cell("M"))],
+    )
+    assert cell_has_color(img, renderer, 0, QColor("#1a1a1a"))  # the block
+    assert cell_has_color(img, renderer, 0, QColor(0xFF, 0xFF, 0xFF))  # the glyph
+
+
+def test_cursor_block_osc12_light_color_draws_dark_glyph(renderer: TerminalRenderer) -> None:
+    # A light cursor color (a dark-theme app) flips the glyph contrast.
+    img = QImage(round(1 * renderer.cell_w), renderer.cell_h, QImage.Format.Format_RGB32)
+    img.fill(Qt.GlobalColor.black)
+    renderer.render(
+        img,
+        snapshot([make_row(Cell("M"))], cursor=(0, 0), cursor_color="#ffffff"),
+        rows=[make_row(Cell("M"))],
+    )
+    assert cell_has_color(img, renderer, 0, QColor(0, 0, 0))  # the glyph
+    assert cell_has_color(img, renderer, 0, QColor("#ffffff"))  # the block
+
+
+def test_cursor_osc12_color_on_empty_cell(renderer: TerminalRenderer, image: QImage) -> None:
+    # The solid block on an empty cell takes the OSC 12 color too.
+    renderer.render(
+        image,
+        snapshot(
+            [make_row(blank_cell()), make_row(blank_cell())],
+            cursor=(0, 0),
+            cursor_color="#1a1a1a",
+        ),
+    )
+    assert cell_pixel(image, renderer, 0) == QColor("#1a1a1a")
 
 
 def test_cursor_outline_leaves_character_visible(renderer: TerminalRenderer) -> None:

@@ -40,21 +40,15 @@ from PyQt6.QtGui import (
     QPolygonF,
 )
 
+from pyqtermx.palette import CUBE_LEVELS, DEFAULT_BG_RGB, DEFAULT_FG_RGB, PALETTE16
 from pyqtermx.screen import Cell, Row, is_rgb, rgb_parts
 from pyqtermx.selection import Selection, column_range
 from pyqtermx.session import Snapshot
 
-#: xterm's 16 ANSI colors (bright variants in the second half).
-_PALETTE: tuple[int, ...] = (
-    0x000000, 0xCD0000, 0x00CD00, 0xCDCD00, 0x0000EE, 0xCD00CD, 0x00CDCD, 0xE5E5E5,
-    0x7F7F7F, 0xFF0000, 0x00FF00, 0xFFFF00, 0x5C5CFF, 0xFF00FF, 0x00FFFF, 0xFFFFFF,
-)
-
-#: The 6×6×6 color cube levels (16–231) and the grayscale ramp (232–255).
-_CUBE_LEVELS = (0, 95, 135, 175, 215, 255)
-
-DEFAULT_FG = QColor(0xE8, 0xE8, 0xE8)
-DEFAULT_BG = QColor(0x10, 0x10, 0x10)
+#: The terminal's default colors — the `-1` cell colors. Single source
+#: of truth: pyqtermx.palette, shared with the emulator's OSC replies.
+DEFAULT_FG = QColor(*DEFAULT_FG_RGB)
+DEFAULT_BG = QColor(*DEFAULT_BG_RGB)
 
 #: One drawing instruction in `_VECTOR_GLYPHS` — the geometry contract
 #: is documented on the table itself.
@@ -298,15 +292,15 @@ class TerminalRenderer:
             qcolor = QColor(r, g, b)
         elif color < 8 and bright:
             color += 8
-            qcolor = QColor(_PALETTE[color])
+            qcolor = QColor(PALETTE16[color])
         elif color < 16:
-            qcolor = QColor(_PALETTE[color])
+            qcolor = QColor(PALETTE16[color])
         elif color < 232:
             value = color - 16
             qcolor = QColor(
-                _CUBE_LEVELS[value // 36],
-                _CUBE_LEVELS[(value // 6) % 6],
-                _CUBE_LEVELS[value % 6],
+                CUBE_LEVELS[value // 36],
+                CUBE_LEVELS[(value // 6) % 6],
+                CUBE_LEVELS[value % 6],
             )
         else:
             gray = 8 + 10 * (color - 232)
@@ -717,12 +711,17 @@ class TerminalRenderer:
         focused cursor): a character under it renders inverted — the
         block is the cell's foreground, the glyph its background — so
         the cursor never hides the text it sits on (xterm); an empty
-        cell keeps the solid block. `CURSOR_OUTLINE` (the unfocused
+        cell keeps the solid block. When the app set an OSC 12 cursor
+        color (opencode, vim, …), the block is that color instead and
+        the glyph contrasts with it by luminance — the app's own caret
+        color, which stays visible even where the app paints its own
+        background (the default inversion would take the cell's white
+        foreground on a light theme). `CURSOR_OUTLINE` (the unfocused
         cursor): a hollow rectangle around the cell — the character
         underneath stays visible, no block at all. `rows` (the merged
         viewport) supplies the cell; `sel_range` is the selection's
         column range on the cursor row, so a selected cell's swap is
-        undone before the inversion."""
+        undone before the default inversion."""
         y, x = snapshot.cursor
         viewport_row = y + snapshot.viewport_offset
         if not (0 <= viewport_row < viewport_lines):
@@ -734,6 +733,7 @@ class TerminalRenderer:
         elif rows is None and snapshot.full and viewport_row < len(snapshot.rows):
             row_cells = snapshot.rows[viewport_row].cells
         cell = row_cells[x] if row_cells is not None and x < len(row_cells) else None
+        cursor_color = snapshot.cursor_color
         if cursor_style == CURSOR_OUTLINE:
             # The unfocused cursor: a hollow rectangle around the cell —
             # the character (or empty background) underneath stays
@@ -751,26 +751,38 @@ class TerminalRenderer:
             painter.drawRect(rect)
             return
         if cell is None or cell.hidden or cell.data == "":
-            # Empty (or unavailable) cell: the solid block.
-            painter.fillRect(rect, self._default_fg)
-            return
-        # The cell's rendered colors — derived exactly as `_paint_row`
-        # does (reverse-video XOR, selection, dim) — the block takes
-        # the foreground, the glyph the background.
-        color = self._color
-        fg = color(cell.fg, self._default_fg, bright=cell.bold)
-        bg = color(cell.bg, self._default_bg)
-        if cell.reverse != snapshot.reverse_video:
-            fg = color(cell.bg, self._default_bg, bright=cell.bold)
-            bg = color(cell.fg, self._default_fg)
-        if sel_range is not None and sel_range[0] <= x <= sel_range[1]:
-            fg, bg = bg, fg
-        if cell.dim:
-            fg = QColor(
-                (fg.red() + bg.red()) // 2,
-                (fg.green() + bg.green()) // 2,
-                (fg.blue() + bg.blue()) // 2,
+            # Empty (or unavailable) cell: the solid block — the OSC 12
+            # cursor color when set, else the default foreground.
+            painter.fillRect(
+                rect, QColor(cursor_color) if cursor_color is not None else self._default_fg
             )
+            return
+        if cursor_color is not None:
+            # OSC 12 — the app's cursor color (opencode, vim, …): the
+            # block is that color, the glyph contrasts with it by
+            # luminance. The default inverted block takes the cell's
+            # foreground, which apps paint white on their own
+            # backgrounds — an invisible caret in light themes.
+            fg = QColor(cursor_color)
+            bg = QColor(0xFF, 0xFF, 0xFF) if fg.lightnessF() < 0.5 else QColor(0, 0, 0)
+        else:
+            # The cell's rendered colors — derived exactly as `_paint_row`
+            # does (reverse-video XOR, selection, dim) — the block takes
+            # the foreground, the glyph the background.
+            color = self._color
+            fg = color(cell.fg, self._default_fg, bright=cell.bold)
+            bg = color(cell.bg, self._default_bg)
+            if cell.reverse != snapshot.reverse_video:
+                fg = color(cell.bg, self._default_bg, bright=cell.bold)
+                bg = color(cell.fg, self._default_fg)
+            if sel_range is not None and sel_range[0] <= x <= sel_range[1]:
+                fg, bg = bg, fg
+            if cell.dim:
+                fg = QColor(
+                    (fg.red() + bg.red()) // 2,
+                    (fg.green() + bg.green()) // 2,
+                    (fg.blue() + bg.blue()) // 2,
+                )
         if row_cells is not None and x + 1 < len(row_cells) and row_cells[x + 1].data == "":
             rect.setWidth(2 * self.cell_w)  # a wide char spans two cells
         painter.fillRect(rect, fg)

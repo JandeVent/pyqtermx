@@ -49,8 +49,10 @@ class Snapshot:
       position (ADR-0006).
     - `cursor`: (row, col) in grid coordinates; the GUI maps it through
       the offset.
-    - `cursor_visible`: the cursor is not hidden (DECTCEM `?25`, shown by
-      default) — the GUI skips the block when false.
+    - `cursor_visible` / `cursor_color`: the cursor is not hidden
+      (DECTCEM `?25`, shown by default) — the GUI skips the block when
+      false — and the OSC 12 cursor color (`#rrggbb`, None = the
+      default inverted block) the renderer paints the cursor with.
     - `dec_ckm` / `bracketed_paste` / `reverse_video`: the input-path and
       rendition mode flags the GUI needs (Q8, effective_rendition) — it
       cannot read the model. `reverse_video` (`?5`) is a *visible* mode:
@@ -87,6 +89,7 @@ class Snapshot:
     full: bool = False
     content_changed: bool = False
     cursor_visible: bool = True
+    cursor_color: str | None = None
 
 
 class Session:
@@ -110,7 +113,12 @@ class Session:
         self.lines = lines
         self.columns = columns
         self.screen = Screen(lines=lines, columns=columns, scrollback_limit=scrollback_limit)
-        self.parser = Parser(Emulator(self.screen))
+        # The reply callback runs on the reader thread — the single
+        # writer — so it can drive the pty like every other write.
+        self.emulator = Emulator(
+            self.screen, reply=lambda text: self.pty.send_data(text.encode("utf-8"))
+        )
+        self.parser = Parser(self.emulator)
         self.snapshots: list[Snapshot] = []
         self._callback = snapshot_callback
         self._queue: queue.Queue[tuple[str, Any]] = queue.Queue()
@@ -120,6 +128,7 @@ class Session:
         self._last_modes = (False, False, False, False, False, False)
         self._last_reverse = False
         self._last_cursor_visible = True
+        self._last_cursor_color: str | None = None
         self._thread = threading.Thread(target=self._run, name="pyqtermx-reader", daemon=True)
 
     # -- Command API (any thread) ---------------------------------------
@@ -145,6 +154,14 @@ class Session:
 
     def scroll_to_bottom(self) -> None:
         self._queue.put(("scroll_to_bottom", None))
+
+    def set_palette(self, fg: str, bg: str) -> None:
+        """Replace the default foreground/background colors the
+        emulator reports to OSC 10/11 color queries (hex `#rrggbb` —
+        the `QColor.name(HexRgb)` form). Posted to the reader thread
+        like every command, so theme detection by TUI apps in the
+        child reports the themed colors."""
+        self._queue.put(("palette", (fg, bg)))
 
     def process(self, data: bytes) -> None:
         """Run the reader thread's per-read step synchronously: feed the
@@ -217,6 +234,9 @@ class Session:
                 self.screen.scroll(payload)
             elif kind == "scroll_to_bottom":
                 self.screen.scroll_to_bottom()
+            elif kind == "palette":
+                fg, bg = payload
+                self.emulator.set_palette(fg, bg)
 
     def _emit(self) -> None:
         """Emit a snapshot when anything visible changed. Rows are
@@ -239,6 +259,7 @@ class Session:
         )
         reverse = screen.mode(5, private=True)  # DECSCNM — a visible mode
         cursor_visible = screen.mode(DECTCEM, private=True)  # DECTCEM — a visible mode
+        cursor_color = self.emulator.cursor_color
         full = self._full or offset != self._last_offset or reverse != self._last_reverse
         mode_changed = modes != self._last_modes
         if cursor != self._last_cursor:
@@ -249,6 +270,11 @@ class Session:
             # A visibility flip repaints the cursor row too — the block
             # is painted over the row, so hiding it must repaint the row
             # (like a cursor move: no text changed, the selection lives).
+            dirty.add(self._last_cursor[0])
+            dirty.add(cursor[0])
+        if cursor_color != self._last_cursor_color:
+            # An OSC 12 color change repaints the cursor row too — the
+            # block color is visible state, like a visibility flip.
             dirty.add(self._last_cursor[0])
             dirty.add(cursor[0])
         if not full and not dirty and not mode_changed:
@@ -286,6 +312,7 @@ class Session:
             full=full,
             content_changed=content_changed,
             cursor_visible=cursor_visible,
+            cursor_color=cursor_color,
         )
         self.snapshots.append(snapshot)
         if self._callback is not None:
@@ -295,4 +322,5 @@ class Session:
         self._last_modes = modes
         self._last_reverse = reverse
         self._last_cursor_visible = cursor_visible
+        self._last_cursor_color = cursor_color
         self._full = False
