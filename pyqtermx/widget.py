@@ -19,7 +19,11 @@ The paint backend:
 
 Paint events are scheduled with `update(QRect)` limited to the region
 the snapshot changed (partial rendering: a one-row update repaints one
-row, not the whole frame).
+row, not the whole frame). A full repaint — the whole grid in the
+damaged region — re-renders the backing from the merged viewport
+instead of blitting it: the frame heals itself from the last snapshot,
+stale or blank pixels included (the compositor may have dropped the
+window surface while the display slept).
 
 Key handling (spec Q8): printables and control keys encode via
 `encode_key` and go to the child, followed by `scroll_to_bottom()`;
@@ -767,12 +771,11 @@ class TerminalWidget(TerminalMixin, QWidget):
     def _rebuild_backing(self) -> None:
         self._image = self._new_backing()
 
-    def _refresh(self) -> None:
-        """Re-render the backing image with the current selection and
-        repaint — the image is the source of truth (the blit only
-        copies it), so a selection change must re-render it. The blink
-        phase rides along (`cursor_visible` override), so a re-render
-        doesn't un-blink a cursor that was mid-hidden-phase."""
+    def _rerender_full(self) -> None:
+        """Render the whole frame from the merged viewport — the source
+        of truth. Never from the last snapshot alone: an incremental
+        one would paint only its dirty rows into the image, blanking
+        every other row."""
         if self._last_snapshot is not None:
             self._renderer.render(
                 self._image,
@@ -782,6 +785,14 @@ class TerminalWidget(TerminalMixin, QWidget):
                 cursor_visible=self._cursor_blink,
                 cursor_style=self._cursor_style,
             )
+
+    def _refresh(self) -> None:
+        """Re-render the backing with the current selection and
+        repaint — the image is the source of truth (the blit only
+        copies it), so a selection change must re-render it. The blink
+        phase rides along (`cursor_visible` override), so a re-render
+        doesn't un-blink a cursor that was mid-hidden-phase."""
+        self._rerender_full()
         self.update()
 
     def _repaint_cursor(self) -> None:
@@ -815,13 +826,10 @@ class TerminalWidget(TerminalMixin, QWidget):
 
     def _resize_backing(self) -> None:
         self._rebuild_backing()
-        if self._last_snapshot is not None:
-            # Best-effort repaint of the last state — no stale frame at
-            # the old grid size while the reader resizes (the next
-            # snapshot is full and replaces this).
-            self._renderer.render(
-                self._image, self._last_snapshot, cursor_style=self._cursor_style
-            )
+        # Best-effort repaint of the last state — no stale frame at the
+        # old grid size while the reader resizes (the next snapshot is
+        # full and replaces this).
+        self._rerender_full()
 
     def _apply_snapshot(self, snapshot: Snapshot) -> None:
         """GUI thread: merge into the viewport rows, repaint, mirror
@@ -867,10 +875,7 @@ class TerminalWidget(TerminalMixin, QWidget):
         super().changeEvent(event)
         if event is not None and event.type() == QEvent.Type.DevicePixelRatioChange:
             self._rebuild_backing()
-            if self._last_snapshot is not None:
-                self._renderer.render(
-                    self._image, self._last_snapshot, cursor_style=self._cursor_style
-                )
+            self._rerender_full()
             self.update()
 
     # -- Painting ----------------------------------------------------------
@@ -882,21 +887,24 @@ class TerminalWidget(TerminalMixin, QWidget):
         painter = QPainter(self)
         rect = event.rect() if event is not None else self.rect()
         painter.fillRect(rect, self._renderer.default_bg)
+        dpr = self.devicePixelRatioF()
         # A backing built before the widget was shown on a scaled screen
         # is 1x — rebuild it lazily rather than upscale the blit.
-        if self._image.devicePixelRatio() != self.devicePixelRatioF():
+        dpr_mismatch = self._image.devicePixelRatio() != dpr
+        if dpr_mismatch:
             self._rebuild_backing()
-            if self._last_snapshot is not None:
-                self._renderer.render(
-                    self._image, self._last_snapshot, cursor_style=self._cursor_style
-                )
-        # Blit only the damaged region — the source rect is in the
-        # image's device pixels, the target in logical coordinates, so
-        # Qt maps 1:1 physical pixels (partial rendering).
-        dpr = self.devicePixelRatioF()
         grid = QRect(
             0, 0, round(self._image.width() / dpr), round(self._image.height() / dpr)
         )
+        # The whole grid damaged — the backing may be stale (the
+        # compositor dropped the window surface on display sleep/wake,
+        # the rebuild just cleared it): re-render the frame instead of
+        # blitting it. Partial repaints blit (the common path).
+        if dpr_mismatch or rect.contains(grid):
+            self._rerender_full()
+        # Blit only the damaged region — the source rect is in the
+        # image's device pixels, the target in logical coordinates, so
+        # Qt maps 1:1 physical pixels (partial rendering).
         src = rect.intersected(grid)
         if not src.isEmpty():
             src_device = QRect(

@@ -27,6 +27,7 @@ from PyQt6.QtGui import (
     QInputMethodEvent,
     QKeyEvent,
     QMouseEvent,
+    QPaintEvent,
     QWheelEvent,
 )
 from PyQt6.QtWidgets import QApplication
@@ -468,6 +469,87 @@ def test_snapshot_repaint_limited_to_dirty_region(
     # A full snapshot repaints the whole grid.
     widget._apply_snapshot(snap((), full=True))
     assert rects[1] == QRect(0, 0, widget._image.width(), widget._image.height())
+
+
+# -- full repaint: the backing heals itself ---------------------------------
+
+
+def row_has_ink(widget: TerminalWidget, row: int) -> bool:
+    """Any non-background pixel in the row's cell band. Glyphs must be
+    probed by scanning the band — antialiasing blends glyph edges into
+    the background, so a single center pixel (or even an exact
+    foreground match) is font-dependent: at 12px Menlo 'h' has solid
+    foreground pixels but 'H' has none."""
+    r = widget._renderer
+    return any(
+        widget._image.pixelColor(x, y) != DEFAULT_BG
+        for y in range(row * r.cell_h, (row + 1) * r.cell_h)
+        for x in range(widget._image.width())
+    )
+
+
+def content_rows(widget: TerminalWidget, char: str) -> tuple[Row, ...]:
+    """`widget._lines` rows with `char` at cell 0 — viewport content
+    for the full-repaint tests."""
+    row = Row([Cell(char)] + [Cell.blank()] * (widget._columns - 1))
+    return tuple(Row(row.cells) for _ in range(widget._lines))
+
+
+def full_content_snapshot(widget: TerminalWidget, char: str) -> Snapshot:
+    return Snapshot(
+        dirty_rows=(),
+        rows=content_rows(widget, char),
+        scrollback_len=0,
+        viewport_offset=0,
+        cursor=(-1, 0),
+        full=True,
+    )
+
+
+def test_full_paint_rerenders_stale_backing(widget: TerminalWidget) -> None:
+    """A full repaint re-renders the backing from the merged viewport —
+    a blanked backing (the compositor dropped the surface on display
+    sleep/wake) heals itself instead of being blitted as-is."""
+    widget._apply_snapshot(full_content_snapshot(widget, "H"))
+    widget._image.fill(DEFAULT_BG)  # the surface came back blank
+    grid = QRect(0, 0, widget._image.width(), widget._image.height())
+    widget.paintEvent(QPaintEvent(grid))
+    assert row_has_ink(widget, 0)
+
+
+def test_partial_paint_blits_without_rerender(widget: TerminalWidget) -> None:
+    """A partial repaint blits the backing — no frame re-render: a row
+    blanked in the backing stays blank after repainting only that row
+    (the heal fires only when the whole grid is damaged)."""
+    widget._apply_snapshot(full_content_snapshot(widget, "H"))
+    widget._image.fill(DEFAULT_BG)
+    row0 = QRect(0, 0, widget._image.width(), widget._renderer.cell_h)
+    widget.paintEvent(QPaintEvent(row0))
+    assert not row_has_ink(widget, 0)
+
+
+def test_dpr_change_rebuilds_full_frame(widget: TerminalWidget) -> None:
+    """A device-pixel-ratio rebuild re-renders the whole frame from the
+    merged viewport — rendering only the last snapshot's dirty rows
+    into the fresh backing would blank every other row. (`changeEvent`
+    is invoked directly: QWidget only routes DevicePixelRatioChange to
+    it when the widget has a window handle, i.e. once shown.)"""
+    widget._apply_snapshot(full_content_snapshot(widget, "a"))
+    # Narrow the last snapshot to row 0 (as a real write would): the
+    # viewport still holds the other rows — they must survive the rebuild.
+    widget._apply_snapshot(
+        Snapshot(
+            dirty_rows=(0,),
+            rows=(content_rows(widget, "a")[0],),
+            scrollback_len=0,
+            viewport_offset=0,
+            cursor=(-1, 0),
+        )
+    )
+    widget._image.fill(DEFAULT_BG)  # the fresh backing a rebuild starts from
+    widget.changeEvent(QEvent(QEvent.Type.DevicePixelRatioChange))
+    assert row_has_ink(widget, 0)  # the dirty row
+    assert row_has_ink(widget, 1)  # and the rest of the frame
 
 
 # -- Mouse: selection, copy, paste, protocol ---------------------------------
