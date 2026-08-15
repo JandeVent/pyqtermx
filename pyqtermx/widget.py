@@ -878,6 +878,10 @@ class TerminalWidget(TerminalMixin, QWidget):
             self._rerender_full()
             self.update()
 
+    def showEvent(self, event):
+        self._apply_resize()
+        super().showEvent(event)
+
     # -- Painting ----------------------------------------------------------
 
     def paintEvent(self, event: QPaintEvent | None) -> None:
