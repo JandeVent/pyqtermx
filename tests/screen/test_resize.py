@@ -52,6 +52,11 @@ def test_shrink_height_keeps_bottom_blank_lines() -> None:
     assert screen.scrollback_len == 2
     screen.scroll(2)  # view the history
     assert screen.viewport_row(0)[0].fg == 2  # the reflowed text kept its green
+    # The history rows are re-padded to the new width — a scrolled-up
+    # viewport must render every column (a short row would leave stale
+    # pixels in its tail — the "tint fragments" after resize).
+    assert len(screen.viewport_row(0).cells) == 8
+    assert len(screen.viewport_row(1).cells) == 8
 
 
 def test_grow_height_pads_blank_lines() -> None:

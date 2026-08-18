@@ -1227,6 +1227,13 @@ class Screen:
                 while state.scrollback and not state.scrollback[-1].cells:
                     state.scrollback.pop()
                 state.scroll_offset = min(state.scroll_offset, len(state.scrollback))
+                # The history rows are trimmed by the reflow (trailing
+                # padding dropped) — re-pad them to the new width so a
+                # scrolled-up viewport renders every column (a short
+                # row would leave stale pixels in its tail — the tint
+                # fragments after resize).
+                for row in state.scrollback:
+                    row.cells.extend([Cell.blank()] * (columns - len(row.cells)))
             else:
                 reflowed = self._reflow_rows(state.grid, columns)
                 if lines >= len(state.grid):
