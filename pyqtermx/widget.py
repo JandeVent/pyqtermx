@@ -199,6 +199,10 @@ class TerminalMixin(_QtBase):
         self._wheel_accum = 0
         self._scrollback_len = 0
         self._offset = 0
+        #: The viewport offset the scrollbar last asked the session to
+        #: reach — deltas are computed against this, not the last
+        #: snapshot's offset, so a fast drag's events don't compound.
+        self._last_scroll_target = 0
 
         self._session: Session | None = None
         # AutoConnection: the signal is emitted on the reader thread, so
@@ -336,7 +340,11 @@ class TerminalMixin(_QtBase):
         scrollbar = self._scrollbar
         scrollbar.blockSignals(True)
         scrollbar.setRange(0, self._scrollback_len)
-        scrollbar.setValue(self._scrollback_len - self._offset)  # top = oldest
+        if not scrollbar.isSliderDown():
+            # The handle follows the mouse while dragging — snapping it
+            # to the last processed offset mid-drag makes it resist.
+            scrollbar.setValue(self._scrollback_len - self._offset)  # top = oldest
+            self._last_scroll_target = self._offset
         scrollbar.blockSignals(False)
         scrollbar.setVisible(self._scrollback_len > 0)
         self._position_scrollbar()
@@ -350,7 +358,8 @@ class TerminalMixin(_QtBase):
         self._clear_selection()  # the viewport content changes under it
         if self._session is not None:
             target = self._scrollback_len - value
-            self._session.scroll(target - self._offset)
+            self._session.scroll(target - self._last_scroll_target)
+            self._last_scroll_target = target
 
     # -- Input (spec Q8) --------------------------------------------------
 
@@ -507,9 +516,15 @@ class TerminalMixin(_QtBase):
                 for _ in range(abs(pages)):
                     self._session.send_data(data)
             return
-        self._wheel_accum = 0
-        steps = max(1, abs(delta) // 120) if abs(delta) >= 120 else 1
-        self._session.scroll(steps * WHEEL_ROWS if delta > 0 else -steps * WHEEL_ROWS)
+        # Sub-notch trackpad deltas bank up in row-sized units (one row per
+        # 120/WHEEL_ROWS degrees), so a swipe scrolls smoothly — one row
+        # at a time, proportional to the gesture — instead of jumping
+        # WHEEL_ROWS rows per event; a physical mouse with 120° notches
+        # still scrolls WHEEL_ROWS rows per notch.
+        self._wheel_accum += delta
+        rows, self._wheel_accum = divmod(self._wheel_accum, 120 // WHEEL_ROWS)
+        if rows:
+            self._session.scroll(rows)
 
     # -- Mouse ----------------------------------------------------------
 

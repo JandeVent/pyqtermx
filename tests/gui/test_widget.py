@@ -328,6 +328,47 @@ def test_wheel_scrolls_viewport(
     qtbot.waitUntil(lambda: session.screen.viewport_offset == 3)
 
 
+def test_wheel_banks_subnotch_trackpad_deltas(
+    widget: TerminalWidget, session: Session, fake: FakePty, qtbot: QtBot
+) -> None:
+    # A trackpad swipe delivers many small deltas; four 30° ticks bank
+    # into one 120° notch = WHEEL_ROWS rows, not four (the alt-screen
+    # path banks the same way — the main screen must too, or a swipe
+    # scrolls 3 rows per event instead of per notch).
+    for i in range(30):
+        fake.output(f"line {i}\r\n".encode())
+    qtbot.waitUntil(lambda: widget._scrollback_len > 0)
+    for _ in range(4):
+        wheel(widget, 30)
+    qtbot.waitUntil(lambda: session.screen.viewport_offset == 3)
+
+
+def test_wheel_subnotch_delta_does_not_scroll(
+    widget: TerminalWidget, session: Session, fake: FakePty, qtbot: QtBot
+) -> None:
+    # A single sub-notch tick (trackpad micro-event) banks but does not
+    # scroll — the viewport moves only when a full 120° notch accrues.
+    for i in range(30):
+        fake.output(f"line {i}\r\n".encode())
+    qtbot.waitUntil(lambda: widget._scrollback_len > 0)
+    wheel(widget, 30)
+    qtbot.wait(50)
+    assert session.screen.viewport_offset == 0
+
+
+def test_wheel_scrolls_one_row_per_40_degrees(
+    widget: TerminalWidget, session: Session, fake: FakePty, qtbot: QtBot
+) -> None:
+    # The smooth-scroll granularity: a trackpad tick of 40° scrolls one
+    # row (120/WHEEL_ROWS per row), so a swipe steps row by row instead
+    # of jumping WHEEL_ROWS rows per event.
+    for i in range(30):
+        fake.output(f"line {i}\r\n".encode())
+    qtbot.waitUntil(lambda: widget._scrollback_len > 0)
+    wheel(widget, 40)
+    qtbot.waitUntil(lambda: session.screen.viewport_offset == 1)
+
+
 def test_resize_debounces_pty_winsize(
     widget: TerminalWidget, session: Session, fake: FakePty, qtbot: QtBot
 ) -> None:
@@ -374,6 +415,41 @@ def test_scrollbar_appearance_never_clips_the_grid(
     qtbot.waitUntil(lambda: widget._scrollback_len > 0)
     qtbot.waitUntil(lambda: widget._scrollbar.isVisible())
     assert fake.winsizes[-1] == (5, 3)
+
+
+def test_scrollbar_drag_does_not_compound_deltas(
+    widget: TerminalWidget, session: Session, fake: FakePty, qtbot: QtBot
+) -> None:
+    # A drag fires many valueChanged events faster than the session
+    # round-trips; each delta must be relative to the last requested
+    # position, not the last snapshot's offset, or the deltas compound
+    # and the viewport overshoots the handle.
+    for i in range(30):
+        fake.output(f"line {i}\r\n".encode())
+    # 30 lines on a 5-row screen: 25 scroll off, the trailing CRLF of the
+    # last line scrolls once more → 26 rows of history.
+    qtbot.waitUntil(lambda: widget._scrollback_len == 26)
+    widget._on_scrollbar(16)  # drag up: value 26 → 16
+    widget._on_scrollbar(6)  # ... → 6, before any snapshot lands
+    qtbot.waitUntil(lambda: session.screen.viewport_offset == 20, timeout=5000)
+
+
+def test_scrollbar_handle_not_snapped_while_dragging(
+    widget: TerminalWidget, session: Session, fake: FakePty, qtbot: QtBot
+) -> None:
+    # While the handle is being dragged, a snapshot must not yank it
+    # back to the last processed offset — the handle follows the mouse
+    # and the session catches up in the background.
+    for i in range(30):
+        fake.output(f"line {i}\r\n".encode())
+    # 30 lines on a 5-row screen: 25 scroll off, the trailing CRLF of the
+    # last line scrolls once more → 26 rows of history.
+    qtbot.waitUntil(lambda: widget._scrollback_len == 26)
+    sb = widget._scrollbar
+    sb.setSliderDown(True)  # the user is dragging the handle
+    sb.setValue(16)  # the handle is where the mouse is
+    widget._update_scrollbar()  # a snapshot arrives mid-drag
+    assert sb.value() == 16  # not yanked back to 26 (scrollback_len - offset)
 
 
 def test_paint_fills_the_area_beyond_the_grid(
