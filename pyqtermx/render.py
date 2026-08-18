@@ -38,6 +38,8 @@ from PyQt6.QtGui import (
     QImage,
     QPainter,
     QPolygonF,
+    QStaticText,
+    QTransform,
 )
 
 from pyqtermx.palette import CUBE_LEVELS, DEFAULT_BG_RGB, DEFAULT_FG_RGB, PALETTE16
@@ -207,6 +209,11 @@ CURSOR_OUTLINE = "outline"
 #: rainbow dump) cannot grow the cache without bound.
 _COLOR_CACHE_CAP = 4096
 
+#: Cap for the QStaticText layout cache — bounded like the color
+#: cache, so a stream of unique glyph-run texts cannot grow it without
+#: bound (the layout of a short terminal run is small, ~1 KB).
+_STATIC_CACHE_CAP = 4096
+
 
 class TerminalRenderer:
     """Paints `Snapshot.rows` into an image sized `lines × columns`
@@ -262,6 +269,15 @@ class TerminalRenderer:
         #: Cell color ints → QColor: a per-cell QColor construction was
         #: ~0.55 s of the htop profile (capped, see `_COLOR_CACHE_CAP`).
         self._color_cache: dict[tuple[int, bool], QColor] = {}
+        #: Glyph-run text → prepared QStaticText, keyed (text, bold,
+        #: italic): drawText re-lays-out the text every call (~12 µs per
+        #: run — the whole remaining paint cost); a prepared QStaticText
+        #: blits the cached glyph positions (~1.5 µs). The layout is
+        #: position- and color-independent — the pen applies at draw
+        #: time and the caller offsets it vertically — so the same text
+        #: at a different row or color still hits. Capped (see
+        #: `_STATIC_CACHE_CAP`), cleared on font change.
+        self._static_cache: dict[tuple[str, bool, bool], QStaticText] = {}
 
     def set_font(self, font: QFont) -> None:
         """Replace the glyph font and re-derive the cell grid metrics.
@@ -334,6 +350,35 @@ class TerminalRenderer:
             font.setItalic(italic)
             self._font_cache[key] = font
         return font
+
+    def _static_text(self, text: str, bold: bool, italic: bool) -> tuple[QStaticText, float]:
+        """A prepared QStaticText layout for `text` in the (bold,
+        italic) font variant plus the vertical offset drawing it at the
+        top of a cell row — cached (see `_static_cache`). Draw it with
+        `drawStaticText` at the run's left edge plus the offset; the
+        pen colors it at draw time. drawText re-lays-out every call
+        (~12 µs/run); the prepared layout blits (~1.5 µs/run). The
+        offset is the single source for both render paths."""
+        cache = self._static_cache
+        key = (text, bold, italic)
+        st = cache.get(key)
+        if st is None:
+            st = QStaticText(text)
+            st.setTextFormat(Qt.TextFormat.PlainText)
+            st.prepare(QTransform(), self._font_for(bold, italic))
+            if len(cache) >= _STATIC_CACHE_CAP:
+                cache.clear()
+            cache[key] = st
+        return st, self._static_text_y(st)
+
+    def _static_text_y(self, st: QStaticText) -> float:
+        """The vertical offset drawing `st` at the top of a cell row:
+        `drawText` (AlignVCenter) centers the font's line box, which is
+        the cell height, so a layout as tall as the cell draws
+        top-aligned — and a layout *taller* than the cell (braille:
+        16 vs 15 in the CI font) must clamp to top-aligned too, not
+        center the taller box (that would shift the dots)."""
+        return max(0.0, (self.cell_h - st.size().height()) / 2.0)
 
     def cell_rect(self, viewport_row: int, col: int) -> QRectF:
         return QRectF(col * self.cell_w, viewport_row * self.cell_h, self.cell_w, self.cell_h)
@@ -466,10 +511,12 @@ class TerminalRenderer:
 
         Hot path: colors and fonts are cached (this method), and
         adjacent cells sharing a rendition are batched into runs — one
-        fillRect per background run, one drawText per glyph run — so a
-        full row of uniform text is a handful of Qt calls, not one per
-        cell (per-cell drawText was ~44% of the htop profile). Box,
-        block, and wide characters break runs and draw individually.
+        fillRect per background run, one drawStaticText per glyph run
+        (the layout cached — `_static_text`; per-run drawText was the
+        remaining paint cost) — so a full row of uniform text is a
+        handful of Qt calls, not one per cell (per-cell drawText was
+        ~44% of the htop profile). Box, block, and wide characters
+        break runs and draw individually.
         `sel_range` (the selection's column range on this row, from
         `selection.column_range`) renders the row's selected cells
         reversed — the swap mirrors the SGR 7 XOR below, so selection
@@ -514,7 +561,8 @@ class TerminalRenderer:
         if run_bg is not None:
             painter.fillRect(QRectF(run_start * cw, y0, (n - run_start) * cw, ch), run_bg)
 
-        # Pass 2: glyphs — one drawText per run of identical rendition.
+        # Pass 2: glyphs — one drawStaticText per run of identical
+        # rendition (the layout cached in `_static_text`).
         font_for = self._font_for
         run_start = 0
         run_text: list[str] = []
@@ -533,7 +581,10 @@ class TerminalRenderer:
             rect = QRectF(run_start * cw, y0, (end_col - run_start) * cw, ch)
             painter.setFont(font_for(*run_font_key))
             painter.setPen(run_fg)
-            painter.drawText(rect, _TEXT_FLAGS, "".join(run_text))
+            # The cached layout (see `_static_text`): drawText's
+            # re-layout per call is the whole paint cost.
+            st, off = self._static_text("".join(run_text), *run_font_key)
+            painter.drawStaticText(QPointF(rect.left(), rect.top() + off), st)
             if run_underline:
                 painter.fillRect(QRectF(rect.left(), rect.bottom() - 1, rect.width(), 1), run_fg)
             if run_strike:
@@ -788,7 +839,8 @@ class TerminalRenderer:
         painter.fillRect(rect, fg)
         painter.setFont(self._font_for(cell.bold, cell.italic))
         painter.setPen(bg)
-        painter.drawText(rect, _TEXT_FLAGS, cell.data)
+        st, off = self._static_text(cell.data, cell.bold, cell.italic)
+        painter.drawStaticText(QPointF(rect.left(), rect.top() + off), st)
         if cell.underline:
             painter.fillRect(QRectF(rect.left(), rect.bottom() - 1, rect.width(), 1), bg)
         if cell.strike:

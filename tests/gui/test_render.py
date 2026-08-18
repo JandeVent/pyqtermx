@@ -14,6 +14,7 @@ import pytest
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QFont, QImage, QPainter
 
+import pyqtermx.render as render_mod
 from pyqtermx.render import DEFAULT_BG, DEFAULT_FG, TerminalRenderer
 from pyqtermx.screen import Cell, Row, rgb
 from pyqtermx.selection import Selection
@@ -863,3 +864,34 @@ def test_selection_does_not_shift_glyphs(renderer: TerminalRenderer) -> None:
                 assert img_sel.pixelColor(x, y) == img_plain.pixelColor(x, y), (
                     f"cell {col} shifted by the selection at pixel ({x}, {y})"
                 )
+
+
+def test_static_text_caches_by_key(renderer: TerminalRenderer) -> None:
+    """The QStaticText layout cache: same (text, bold, italic) returns
+    the same prepared layout; any key change is a distinct layout."""
+    a, _ = renderer._static_text("hello", False, False)
+    b, _ = renderer._static_text("hello", False, False)
+    assert b is a
+    c, _ = renderer._static_text("world", False, False)
+    assert c is not a
+    d, _ = renderer._static_text("hello", True, False)
+    assert d is not a
+    e, _ = renderer._static_text("hello", False, True)
+    assert e is not a
+
+
+def test_static_text_cache_is_bounded(renderer: TerminalRenderer) -> None:
+    """A stream of unique texts cannot grow the cache without bound
+    (the clear-on-overflow contract, like the color cache)."""
+    for i in range(render_mod._STATIC_CACHE_CAP + 16):
+        renderer._static_text(f"t{i}", False, False)
+    assert len(renderer._static_cache) <= render_mod._STATIC_CACHE_CAP
+
+
+def test_static_text_cache_clears_on_font_change(renderer: TerminalRenderer) -> None:
+    """Prepared layouts are font-specific — a font change must rebuild
+    them (stale layouts would paint at the old metrics)."""
+    a, _ = renderer._static_text("hello", False, False)
+    renderer.set_font(renderer.font)  # same font — the cache still clears
+    b, _ = renderer._static_text("hello", False, False)
+    assert b is not a

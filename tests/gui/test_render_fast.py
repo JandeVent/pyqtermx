@@ -15,7 +15,7 @@ a selection, which combine with SGR 7 via the XOR.
 from __future__ import annotations
 
 import pytest
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QRectF, Qt
 from PyQt6.QtGui import QImage, QPainter
 
 import pyqtermx.render as render_mod
@@ -131,3 +131,71 @@ def test_collect_runs_classifies_vector_glyphs() -> None:
     kinds = {r[0] for r in runs}
     assert kinds == {0, 2}  # background runs + individual draws, no batched text
     assert len(runs) == len(cells) + 1  # one bg run + one draw per cell
+
+
+def _render_uniform_row(renderer: TerminalRenderer, cells: list[Cell]) -> QImage:
+    snap = Snapshot(
+        dirty_rows=(0,),
+        rows=(Row(cells),),
+        scrollback_len=0,
+        viewport_offset=0,
+        cursor=(-1, 0),
+        cursor_visible=False,
+    )
+    return render_row(renderer, snap, None)
+
+
+def _draw_text_reference(
+    renderer: TerminalRenderer, text: str, cells: list[Cell]
+) -> QImage:
+    """The same row painted by hand: one background fill over the row
+    plus a plain `drawText` — the pre-cache glyph path, the exact
+    pixels the cached-QStaticText path must reproduce."""
+    img = QImage(
+        round(renderer.cell_w * len(cells)),
+        renderer.cell_h,
+        QImage.Format.Format_RGB32,
+    )
+    img.fill(Qt.GlobalColor.black)
+    painter = QPainter(img)
+    try:
+        painter.fillRect(
+            QRectF(0, 0, renderer.cell_w * len(cells), renderer.cell_h),
+            renderer.default_bg,
+        )
+        painter.setFont(renderer.font)
+        painter.setPen(renderer.default_fg)
+        painter.drawText(
+            QRectF(0, 0, renderer.cell_w * len(cells), renderer.cell_h),
+            render_mod._TEXT_FLAGS,
+            text,
+        )
+    finally:
+        painter.end()
+    return img
+
+
+def test_static_path_matches_plain_draw_text(renderer: TerminalRenderer) -> None:
+    """One uniform glyph run: the cached-QStaticText path paints the
+    same pixels as a manual drawText with the same flags — the offset
+    math's contract (a layout as tall as the cell draws top-aligned)."""
+    cells = [Cell("hello world ") for _ in range(6)]
+    got = _render_uniform_row(renderer, cells)
+    ref = _draw_text_reference(renderer, "".join(c.data for c in cells), cells)
+    assert got.constBits().asstring(got.sizeInBytes()) == ref.constBits().asstring(
+        ref.sizeInBytes()
+    )
+
+
+def test_static_path_matches_plain_draw_text_braille(
+    renderer: TerminalRenderer,
+) -> None:
+    """Braille lays out taller than the cell (16 vs 15 in the CI font)
+    — the offset must clamp to top-aligned, not center the taller box
+    (which would shift the dots)."""
+    cells = [Cell("⠋")]
+    got = _render_uniform_row(renderer, cells)
+    ref = _draw_text_reference(renderer, "⠋", cells)
+    assert got.constBits().asstring(got.sizeInBytes()) == ref.constBits().asstring(
+        ref.sizeInBytes()
+    )

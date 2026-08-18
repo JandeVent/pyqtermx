@@ -8,9 +8,8 @@ of `_paint_row`: three `_color()` calls per cell (dict lookups + QColor
 construction), `ord`/`len`/`append` per cell, and ~13M dataclass
 attribute reads per 600 donut frames. Moving the loop to C eliminates
 the interpreter dispatch while keeping the Qt calls (one fillRect /
-drawText per run) in Python — the same run batching the pure-Python
-path does, so the two paths paint identical pixels.
-
+drawStaticText per run) in Python — the same run batching the
+pure-Python path does, so the two paths paint identical pixels.
 Design:
 - collect_runs() walks the row's cells in C and emits compact run
   tuples: background runs (kind 0), glyph runs (kind 1), and
@@ -18,7 +17,10 @@ Design:
   compared in C (the bold-is-bright step folded in), so no QColor is
   built per cell; the draw loop resolves one QColor per run.
 - paint_row() collects the runs and makes the Qt calls, calling back
-  into the renderer for box/block drawing (rare).
+  into the renderer for box/block drawing (rare). Glyph runs draw
+  through the renderer's QStaticText layout cache (drawText re-lays-out
+  every call — the cached layout blits), and setFont/setPen are
+  skipped when consecutive runs share them.
 - render.py keeps the pure-Python `_paint_row` as the fallback when
   the extension is not built (the same try/except pattern as
   `_screen_fast`).
@@ -26,7 +28,7 @@ Design:
 
 from cpython.unicode cimport PyUnicode_READ_CHAR
 
-from PyQt6.QtCore import QRectF
+from PyQt6.QtCore import QPointF, QRectF
 
 from .render import (
     DEFAULT_BG,
@@ -109,7 +111,8 @@ cpdef list collect_runs(row, bint reverse_video, sel_range=None,
       fillRect over [start, end). `sel` is 0 for the bg default,
       1 for the fg default (the SGR 7 / DECSCNM swap).
     - `(1, start, end, fg_int, sel, bold, italic, underline, strike,
-      overline, text)` — a glyph run: one drawText over [start, end).
+      overline, text)` — a glyph run: one drawStaticText over
+      [start, end) (the prepared layout, see `_static_text`).
     - `(2, col, cp, data, fg_int, bg_int, fg_sel, bg_sel, bold,
       italic, underline, strike, overline, wide)` — a vector/wide cell
       drawn individually.
@@ -266,7 +269,7 @@ cpdef void paint_row(painter, renderer, int viewport_row, row, bint reverse_vide
                      sel_range=None):
     """Fast path for `TerminalRenderer._paint_row`: collect the runs in
     C, then make the Qt calls — one fillRect per background run, one
-    drawText per glyph run, individual draws for vector/wide cells.
+    drawStaticText per glyph run, individual draws for vector/wide cells.
     `renderer` supplies the color/font caches, the vector codepoint
     set, and the vector-glyph primitive painter; the painter stays
     open (callers own it)."""
@@ -284,7 +287,13 @@ cpdef void paint_row(painter, renderer, int viewport_row, row, bint reverse_vide
     cdef int y0 = viewport_row * ch
     cdef object color = renderer._color
     cdef object font_for = renderer._font_for
-    cdef object run, text, data, fg, bg, rect
+    cdef object run, text, data, fg, bg, rect, font, st, off
+    #: The painter's current font/pen — consecutive runs usually share
+    #: them, and setFont/setPen are Qt state changes (skipped when
+    #: unchanged). Reset after an individual draw (kind 2): vector
+    #: glyphs change the painter's pen/brush themselves.
+    cdef object last_font = None
+    cdef object last_pen = None
     cdef int kind, start, end, ci, cj, sel, sel2, cp, col
     cdef bint bold, italic, underline, strike, overline, wide
     cdef object dflt_fg = renderer._default_fg
@@ -303,7 +312,11 @@ cpdef void paint_row(painter, renderer, int viewport_row, row, bint reverse_vide
                 color(ci, dflt_fg if sel == 1 else dflt_bg),
             )
         elif kind == 1:
-            # Glyph run: one drawText plus the underline/strike/overline fills.
+            # Glyph run: one drawStaticText from the renderer's
+            # prepared-layout cache (see `TerminalRenderer._static_text`
+            # — drawText re-lays-out every call, the cached layout
+            # blits; the returned offset is the single source for both
+            # render paths) plus the underline/strike/overline fills.
             start = run[1]
             end = run[2]
             ci = run[3]
@@ -315,16 +328,21 @@ cpdef void paint_row(painter, renderer, int viewport_row, row, bint reverse_vide
             overline = run[9]
             text = run[10]
             fg = color(ci, dflt_fg if sel == 1 else dflt_bg)
-            rect = QRectF(start * cw, y0, (end - start) * cw, ch)
-            painter.setFont(font_for(bold, italic))
-            painter.setPen(fg)
-            painter.drawText(rect, _TEXT_FLAGS, "".join(text))
+            font = font_for(bold, italic)
+            if font is not last_font:
+                painter.setFont(font)
+                last_font = font
+            if fg is not last_pen:
+                painter.setPen(fg)
+                last_pen = fg
+            st, off = renderer._static_text("".join(text), bold, italic)
+            painter.drawStaticText(QPointF(start * cw, y0 + off), st)
             if underline:
-                painter.fillRect(QRectF(rect.left(), rect.bottom() - 1, rect.width(), 1), fg)
+                painter.fillRect(QRectF(start * cw, y0 + ch - 1, (end - start) * cw, 1), fg)
             if strike:
-                painter.fillRect(QRectF(rect.left(), rect.top() + rect.height() // 2, rect.width(), 1), fg)
+                painter.fillRect(QRectF(start * cw, y0 + ch // 2, (end - start) * cw, 1), fg)
             if overline:
-                painter.fillRect(QRectF(rect.left(), rect.top(), rect.width(), 1), fg)
+                painter.fillRect(QRectF(start * cw, y0, (end - start) * cw, 1), fg)
         else:
             # Box/block/wide cell: draw individually.
             col = run[1]
@@ -352,6 +370,11 @@ cpdef void paint_row(painter, renderer, int viewport_row, row, bint reverse_vide
                 painter.setFont(font_for(bold, italic))
                 painter.setPen(fg)
                 painter.drawText(rect, _TEXT_FLAGS, data)
+            # Individual draws change the painter state behind the
+            # run loop's back (vector glyphs set pen/brush) — the next
+            # run re-establishes its font/pen unconditionally.
+            last_font = None
+            last_pen = None
             if underline:
                 painter.fillRect(QRectF(rect.left(), rect.bottom() - 1, rect.width(), 1), fg)
             if strike:
