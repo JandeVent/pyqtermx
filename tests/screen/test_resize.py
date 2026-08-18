@@ -38,6 +38,22 @@ def test_shrink_height_keeps_bottom_lines() -> None:
     assert screen.render() == "2222\n3333"
 
 
+def test_shrink_height_keeps_bottom_blank_lines() -> None:
+    """Shrinking the height keeps the *newest* rows — the grid's bottom
+    blanks — not the reflowed text above them. The trailing-blank trim
+    must not let old content fall into the grid (the resize+scroll
+    "old text tints" bug): text at the top of a tall screen, blanks
+    below, shrink the height → the grid stays blank and the text goes
+    to history."""
+    screen = feed_to("\x1b[32mROW-1-GRN\r\n", lines=24, columns=80)
+    screen.resize(4, 8)
+    assert screen.render() == "        \n        \n        \n        "
+    # "ROW-1-GRN" reflows to "ROW-1-GR" + "N" in history, rendition kept.
+    assert screen.scrollback_len == 2
+    screen.scroll(2)  # view the history
+    assert screen.viewport_row(0)[0].fg == 2  # the reflowed text kept its green
+
+
 def test_grow_height_pads_blank_lines() -> None:
     screen = feed_to("ab", lines=2, columns=4)
     screen.resize(4, 4)
@@ -45,7 +61,7 @@ def test_grow_height_pads_blank_lines() -> None:
 
 
 def test_reflow_preserves_rendition() -> None:
-    screen = feed_to("\x1b[31mred", lines=2, columns=6)
+    screen = feed_to("\r\n\x1b[31mred", lines=2, columns=6)
     screen.resize(1, 2)
     line = screen.line(0)
     # "red" reflows to "re"+"d"; only the bottom row survives, so row 0

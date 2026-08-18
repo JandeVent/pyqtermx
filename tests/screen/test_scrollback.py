@@ -197,13 +197,15 @@ def test_resize_reflows_history_and_grid_together() -> None:
 
 def test_resize_narrow_keeps_newest_grid_and_history() -> None:
     screen = feed_to("".join(f"{i}\r\n" for i in range(1, 7)), lines=4, columns=4)
-    # History 1,2,3; grid 4,5,6.
+    # History 1,2,3; grid 4,5,6,blank.
     assert screen.scrollback_len == 3
     screen.resize(2, 4)
-    # Stream reflows to 6 rows: grid keeps the newest 2, rest is history.
-    assert screen.scrollback_len == 4
+    # Stream reflows to 7 rows (6 content + the grid's bottom blank);
+    # the grid keeps its newest 2 rows — "6" and the bottom blank — and
+    # the rest is history.
+    assert screen.scrollback_len == 5
     rows = [text(screen.viewport_row(k)) for k in range(2)]
-    assert rows == ["5", "6"]
+    assert rows == ["6", ""]
     assert screen.viewport_offset == 0  # still live
 
 

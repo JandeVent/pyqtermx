@@ -115,9 +115,11 @@ def test_cursor_position_carries_both_ways() -> None:
 def test_resize_reflows_both_grids() -> None:
     """ADR-0003 + ADR-0004: resize reflows the normal grid and the
     alternate grid independently — wrapped rows re-join on the alt
-    grid too, and the main grid is preserved underneath."""
+    grid too, and the main grid is preserved underneath. Content sits
+    at the bottom of each grid so it survives the shrink (the grid
+    keeps its newest rows)."""
     parser, _emulator, screen = make_screen(6, 10)
-    parser.feed("abc\r\ndef\x1b[?1047h\r\nuvwxyz")
+    parser.feed("\r\n\r\n\r\nabc\r\ndef\x1b[?1047h\r\n\r\n\r\n\r\nuvwxyz")
     parser.flush()
     screen.resize(4, 5)
     # Still in the alt screen: its grid reflowed at the new width.

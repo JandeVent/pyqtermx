@@ -1196,7 +1196,9 @@ class Screen:
         the boundary re-joins exactly as if the screen were taller; the
         newest `lines` rows stay the grid, the rest remain history.
         Shrinking the height keeps each grid's bottom lines — the
-        newest content; the cursor and the viewport offset clamp in.
+        newest rows, blank or not (old text reflows into history, so a
+        mostly-blank screen stays blank); the cursor and the viewport
+        offset clamp in.
         Wrapped rows re-join the row above on widen (the marker rides
         the reflow)."""
         if lines < 1 or columns < 1:
@@ -1208,11 +1210,28 @@ class Screen:
                 # One-stream reflow (ADR-0006): history + grid re-wrap
                 # together; the newest `lines` rows become the grid.
                 reflowed = self._reflow_rows(state.scrollback + state.grid, columns)
+                if lines >= len(state.grid):
+                    # Growing or steady height: the stream's trailing
+                    # blank separators are padding the grid re-pads
+                    # anyway — drop them so the newest `lines` rows are
+                    # the content (a full grid re-wrapped to fewer rows
+                    # must not lose its head to history).
+                    while reflowed and not reflowed[-1].cells:
+                        reflowed.pop()
                 kept = reflowed[-lines:] if len(reflowed) >= lines else reflowed
                 state.scrollback = reflowed[:-lines] if len(reflowed) > lines else []
+                # The history's trailing blank separators are padding
+                # (the grid's bottom blanks stayed in `kept` — they are
+                # the newest rows); drop them so the scrollbar range
+                # ends at the last content row.
+                while state.scrollback and not state.scrollback[-1].cells:
+                    state.scrollback.pop()
                 state.scroll_offset = min(state.scroll_offset, len(state.scrollback))
             else:
                 reflowed = self._reflow_rows(state.grid, columns)
+                if lines >= len(state.grid):
+                    while reflowed and not reflowed[-1].cells:
+                        reflowed.pop()
                 kept = reflowed[-lines:] if len(reflowed) >= lines else reflowed
             state.grid = []
             for row in kept:
@@ -1257,8 +1276,11 @@ class Screen:
         new width): leading and interior blanks are kept, and a fully
         blank row stays as a blank separator once content has been
         emitted. Wide characters fill two cells; a glyph that no longer
-        fits at the row's end moves to the next. Trailing blank rows at
-        the end of the reflow are trimmed.
+        fits at the row's end moves to the next. Trailing blank rows are
+        kept — the caller (`resize`) splits the stream into history and
+        grid by the newest `lines` rows, and the grid's bottom blanks
+        are exactly those newest rows; trimming them here would let old
+        content fall into the grid. The caller trims the history tail.
         """
         out: list[Row] = []
         out_row: list[Cell] = []
@@ -1322,8 +1344,6 @@ class Screen:
                     pending_cont = True
         if out_row:
             out.append(Row(out_row, cont))
-        while out and not out[-1].cells:
-            out.pop()  # trailing blank separators are padding
         return out
 
     # -- Scrolling ------------------------------------------------------
