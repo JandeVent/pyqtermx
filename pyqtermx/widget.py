@@ -62,7 +62,14 @@ from PyQt6.QtGui import (
     QFont,
     QColor
 )
-from PyQt6.QtWidgets import QApplication, QScrollBar, QWidget
+from PyQt6.QtWidgets import (
+    QApplication,
+    QProxyStyle,
+    QScrollBar,
+    QStyle,
+    QStyleOption,
+    QWidget,
+)
 
 from pyqtermx.input import (
     CTRL_MOD,
@@ -100,6 +107,33 @@ CURSOR_BLINK_MS = 500
 #: The default terminal geometry until a resize arrives.
 DEFAULT_LINES = 24
 DEFAULT_COLUMNS = 80
+
+#: The scrollbar handle's minimum length in pixels. Qt sizes the handle
+#: as pageStep / (range + pageStep) of the track, clamped to the
+#: platform's PM_ScrollBarSliderMin — with a long scrollback that
+#: minimum is a sliver. This floor keeps the handle grabbable no matter
+#: how much history accumulates.
+SCROLLBAR_MIN_HANDLE_PX = 40
+
+
+class _MinHandleStyle(QProxyStyle):
+    """Enforce a minimum scrollbar handle length, native look intact.
+
+    A plain QScrollBar with a large range shrinks its handle to the
+    platform minimum (a sliver on huge histories). Overriding
+    `PM_ScrollBarSliderMin` floors the handle at
+    `SCROLLBAR_MIN_HANDLE_PX` pixels; everything else defers to the
+    base style, so the scrollbar still renders natively."""
+
+    def pixelMetric(
+        self,
+        metric: QStyle.PixelMetric,
+        option: QStyleOption | None = None,
+        widget: QWidget | None = None,
+    ) -> int:
+        if metric == QStyle.PixelMetric.PM_ScrollBarSliderMin:
+            return SCROLLBAR_MIN_HANDLE_PX
+        return super().pixelMetric(metric, option, widget)
 
 
 def merge_viewport(snapshot: Snapshot, prev: list[Row] | None) -> list[Row] | None:
@@ -164,6 +198,7 @@ class TerminalMixin(_QtBase):
         self._last_click_time = 0.0
 
         self._scrollbar = QScrollBar(Qt.Orientation.Vertical, self)
+        self._scrollbar.setStyle(_MinHandleStyle())
         self._scrollbar.valueChanged.connect(self._on_scrollbar)
         self._scrollbar.hide()
 
@@ -340,6 +375,10 @@ class TerminalMixin(_QtBase):
         scrollbar = self._scrollbar
         scrollbar.blockSignals(True)
         scrollbar.setRange(0, self._scrollback_len)
+        # The handle represents the viewport: pageStep = visible lines,
+        # so the handle is the on-screen fraction of the history (and
+        # groove-clicks page by a screenful, not 10 lines).
+        scrollbar.setPageStep(self._lines)
         if not scrollbar.isSliderDown():
             # The handle follows the mouse while dragging — snapping it
             # to the last processed offset mid-drag makes it resist.
