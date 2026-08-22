@@ -107,6 +107,7 @@ class Session:
         lines: int = 24,
         columns: int = 80,
         scrollback_limit: int = 1000,
+        snapshot_limit: int = 1000,
         snapshot_callback: Callable[[Snapshot], None] | None = None,
     ) -> None:
         self.pty = pty
@@ -120,6 +121,7 @@ class Session:
         )
         self.parser = Parser(self.emulator)
         self.snapshots: list[Snapshot] = []
+        self._snapshot_limit = snapshot_limit
         self._callback = snapshot_callback
         self._queue: queue.Queue[tuple[str, Any]] = queue.Queue()
         self._full = True
@@ -315,6 +317,9 @@ class Session:
             cursor_color=cursor_color,
         )
         self.snapshots.append(snapshot)
+        # Trim old snapshots to prevent unbounded memory growth.
+        if self._snapshot_limit > 0 and len(self.snapshots) > self._snapshot_limit:
+            del self.snapshots[: len(self.snapshots) - self._snapshot_limit]
         if self._callback is not None:
             self._callback(snapshot)
         self._last_offset = offset
