@@ -1,22 +1,22 @@
 {
   "env": {
-    "date": "2026-08-18 13:02:18",
+    "date": "2026-08-24 15:21:01",
     "platform": "macOS-15.6-arm64-arm-64bit",
     "python": "3.11.4",
     "pyqt": "6.11.0"
   },
   "workloads": {
     "scroll_flood": {
-      "mb_per_s": 2.4654950421209767,
-      "lines_per_s": 418632.63526352035
+      "mb_per_s": 1.2667260631584631,
+      "lines_per_s": 215085.7579988561
     },
     "htop_incremental": {
-      "rasterize_ms_per_frame": 0.3109863849240355,
+      "rasterize_ms_per_frame": 0.5878423941030633,
       "damaged_rows_fraction": 0.27420833333333333
     },
     "paste_burst": {
-      "total_ms": 85.47170901147183,
-      "mb_per_s": 11.461242688718421
+      "total_ms": 139.58595800795592,
+      "mb_per_s": 7.01798385725995
     }
   }
 }

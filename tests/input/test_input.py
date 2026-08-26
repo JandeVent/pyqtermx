@@ -78,6 +78,11 @@ def test_enter_is_carriage_return() -> None:
     assert encode_key(key(Qt.Key.Key_Enter, "\r")) == b"\r"
 
 
+def test_shift_enter_is_line_feed() -> None:
+    assert encode_key(key(Qt.Key.Key_Return, "\r", SHIFT)) == b"\n"
+    assert encode_key(key(Qt.Key.Key_Enter, "\r", SHIFT)) == b"\n"
+
+
 def test_tab_and_backspace() -> None:
     assert encode_key(key(Qt.Key.Key_Tab, "\t")) == b"\t"
     assert encode_key(key(Qt.Key.Key_Backspace, "\x7f")) == b"\x7f"

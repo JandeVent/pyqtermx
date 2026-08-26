@@ -176,6 +176,8 @@ def encode_key(
         return None if scrollback_len > 0 else b"\x1b[6~"
 
     if qkey in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+        if shift:
+            return b"\n"
         return b"\x1b\r" if alt else b"\r"
     if qkey in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
         # Shift+Tab is back-tab (CSI Z — Qt reports Key_Backtab on some
