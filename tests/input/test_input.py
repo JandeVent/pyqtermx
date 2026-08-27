@@ -168,8 +168,8 @@ def test_tab_with_modifiers() -> None:
 def test_insert_and_delete() -> None:
     assert encode_key(key(Qt.Key.Key_Insert, "")) == b"\x1b[2~"
     assert encode_key(key(Qt.Key.Key_Delete, "")) == b"\x1b[3~"
-    assert encode_key(key(Qt.Key.Key_Delete, "", ctrl())) == b"\x1b[1;53~"
-    assert encode_key(key(Qt.Key.Key_Insert, "", ALT)) == b"\x1b[1;32~"
+    assert encode_key(key(Qt.Key.Key_Delete, "", ctrl())) == b"\x1b[3;5~"
+    assert encode_key(key(Qt.Key.Key_Insert, "", ALT)) == b"\x1b[2;3~"
 
 
 def test_function_keys() -> None:

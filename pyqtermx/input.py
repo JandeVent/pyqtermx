@@ -196,7 +196,9 @@ def encode_key(
         n = _modifier_code(shift, alt, ctrl)
         if n == 1:
             return b"\x1b[" + _EDIT_FINALS[qkey].encode()
-        return f"\x1b[1;{n}{_EDIT_FINALS[qkey]}".encode()
+        # xterm format: CSI key_code;modifier ~  (not CSI 1;modifier key_code~)
+        key_code = _EDIT_FINALS[qkey].rstrip("~")
+        return f"\x1b[{key_code};{n}~".encode()
     if qkey in _FKEY_FINALS:
         n = _modifier_code(shift, alt, ctrl)
         if n == 1 and qkey <= Qt.Key.Key_F4:
