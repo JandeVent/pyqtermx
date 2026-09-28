@@ -85,12 +85,13 @@ _Primitive: TypeAlias = (
 #:   coordinates, endpoints inclusive (box arms reach the cell edges).
 #: - `("arc", cx, cy, r, a0, a1)` — an arc (fg), radius `r × u`,
 #:   angles in degrees (rounded box corners).
-#: - `("round", quadrant)` — a rounded box corner (fg): a quarter
-#:   circle of radius `0.25 × u` in the cell center plus the two legs
-#:   reaching its own cell edges. The legs are computed from the live
-#:   cell rect — a fixed `0.25` endpoint would leave a gap between a
-#:   leg and the arc on non-square cells (the arc radius scales with
-#:   `u`, the legs with their own dimension).
+#: - `("round", quadrant)` — a rounded box corner (fg): a half-circle
+#:   arc whose endpoints sit at mid-height, plus the two legs to the
+#:   cell edges the corner joins in a frame (╭ the right and bottom
+#:   edges). The legs are computed from the live cell rect — a fixed
+#:   `0.25` endpoint would leave a gap between a leg and the arc on
+#:   non-square cells (the arc radius scales with `u`, the legs with
+#:   their own dimension).
 #: - `("square", size, cx, cy, style)` / `("circle", size, cx, cy,
 #:   style)` — a centered shape of side/diameter `size × u`, offset by
 #:   `cx × u` / `cy × u`. `style` is "fill" or "ring" (outline).
@@ -120,12 +121,12 @@ _VECTOR_GLYPHS: dict[int, tuple[_Primitive, ...]] = {
     0x2534: (("line", 0.0, 0.5, 1.0, 0.5), ("line", 0.5, 0.5, 0.5, 0.0)),  # ┴
     0x253C: (("line", 0.0, 0.5, 1.0, 0.5), ("line", 0.5, 0.0, 0.5, 1.0)),  # ┼
     # Rounded corners: a quarter circle in the cell center plus two
-    # legs — each corner reaches its own cell edges (╭ the top and
-    # left edges, etc.). The legs are drawn from the live cell rect
-    # (see the `round` primitive): a fixed 0.25 endpoint would leave a
-    # gap between a leg and the arc on tall cells (the pre-fix bug —
-    # ╭╮╰╯ all showed a notch, and ╯ drew its arc in the top-left
-    # quadrant).
+    # legs — each corner joins the frame edges it connects to (╭ the
+    # right and bottom edges, etc.; the pre-fix table drew all four
+    # rotated 180°, leaving a gap between the corner and its ─/│
+    # neighbors). The legs are drawn from the live cell rect (see the
+    # `round` primitive): a fixed 0.25 endpoint would leave a gap
+    # between a leg and the arc on tall cells.
     0x256D: (("round", "tl"),),  # ╭ top-left
     0x256E: (("round", "tr"),),  # ╮ top-right
     0x256F: (("round", "bl"),),  # ╯ bottom-left
@@ -713,36 +714,42 @@ class TerminalRenderer:
                         a0 * 16, a1 * 16,
                     )
                 case ("round", quadrant):
-                    # A rounded box corner: a quarter circle of radius
-                    # 0.25u in the cell center plus the two legs to its
-                    # own edges. The legs are computed from the live
-                    # rect — a fixed 0.25 endpoint would leave a gap
-                    # between a leg and the arc on non-square cells.
+                    # A rounded box corner: a half-circle arc whose
+                    # endpoints sit at mid-height, plus the two legs to
+                    # the cell edges the corner joins — ╭ the right and
+                    # bottom edges, so the frame's ─ and │ neighbors
+                    # meet it seamlessly (the font's ╭─── is one
+                    # continuous line at mid-height; the pre-fix table
+                    # drew all four rotated 180°, leaving a gap between
+                    # the corner and its neighbors). The legs are
+                    # computed from the live rect — a fixed 0.25
+                    # endpoint would leave a gap between a leg and the
+                    # arc on non-square cells.
                     r = 0.25 * u
                     painter.setPen(fg)
-                    a0, sweep = {
-                        "tl": (90, 90), "tr": (90, -90),
-                        "bl": (180, 90), "br": (0, -90),
-                    }[quadrant]
+                    # The arc: the top half circle for the top corners,
+                    # the bottom half for the bottom ones — endpoints
+                    # at mid-height, where the horizontal leg joins.
+                    a0, sweep = (0, 180) if quadrant in ("tl", "tr") else (0, -180)
                     painter.drawArc(
                         QRectF(x + w / 2 - r, y + h / 2 - r, 2 * r, 2 * r),
                         a0 * 16, sweep * 16,
                     )
                     if quadrant in ("tl", "bl"):
                         painter.drawLine(
-                            QPointF(x, y + h / 2), QPointF(x + w / 2 - r, y + h / 2)
+                            QPointF(x + w / 2 + r, y + h / 2), QPointF(x + w, y + h / 2)
                         )
                     else:
                         painter.drawLine(
-                            QPointF(x + w, y + h / 2), QPointF(x + w / 2 + r, y + h / 2)
+                            QPointF(x, y + h / 2), QPointF(x + w / 2 - r, y + h / 2)
                         )
                     if quadrant in ("tl", "tr"):
                         painter.drawLine(
-                            QPointF(x + w / 2, y), QPointF(x + w / 2, y + h / 2 - r)
+                            QPointF(x + w / 2, y + h / 2 - r), QPointF(x + w / 2, y + h)
                         )
                     else:
                         painter.drawLine(
-                            QPointF(x + w / 2, y + h), QPointF(x + w / 2, y + h / 2 + r)
+                            QPointF(x + w / 2, y), QPointF(x + w / 2, y + h / 2 + r)
                         )
                 case ("square" | "circle", size, sx, sy, style):
                     side = size * u

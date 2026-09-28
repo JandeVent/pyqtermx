@@ -567,15 +567,16 @@ def test_box_drawing_arms_are_orthogonal(renderer: TerminalRenderer) -> None:
 
 
 def test_rounded_corners_reach_their_own_edges(renderer: TerminalRenderer) -> None:
-    # ╭╮╯╰ (U+256D–2570): each corner's strokes must reach its own cell
-    # edges — ╭ the top and left edges, ╮ top and right, ╯ left and
-    # bottom, ╰ right and bottom. The pre-table code drew all four
-    # rotated 180° (╭ reached bottom and right).
+    # ╭╮╯╰ (U+256D–2570): each corner's strokes must reach the cell
+    # edges it joins in a frame — ╭ the right and bottom edges, ╮ left
+    # and bottom, ╯ right and top, ╰ left and top (the font's ╭─── is
+    # a continuous line at mid-height). The pre-fix table drew all
+    # four rotated 180° (╭ reached top and left).
     corners = {
-        0x256D: ("T", "L"),  # ╭
-        0x256E: ("T", "R"),  # ╮
-        0x256F: ("B", "L"),  # ╯
-        0x2570: ("B", "R"),  # ╰
+        0x256D: ("R", "B"),  # ╭
+        0x256E: ("L", "B"),  # ╮
+        0x256F: ("R", "T"),  # ╯
+        0x2570: ("L", "T"),  # ╰
     }
     for cp, arms in corners.items():
         img = QImage(round(1 * renderer.cell_w), 1 * renderer.cell_h, QImage.Format.Format_RGB32)
@@ -630,6 +631,37 @@ def test_rounded_corner_arc_connects_to_its_arms(renderer: TerminalRenderer) -> 
         assert len(seen) == len(painted), (
             f"{chr(cp)}: the arc must connect to both arms (gap in the corner)"
         )
+
+
+def test_rounded_corner_joins_its_frame_seamlessly(renderer: TerminalRenderer) -> None:
+    # ╭─ / │ : the corner's arms must meet the ─ and │ neighbors — the
+    # top edge is one continuous line at mid-height, the left edge one
+    # continuous line at mid-width (the pre-fix table drew the corners
+    # rotated 180°, leaving a gap between ╭ and ─).
+    img = QImage(
+        round(2 * renderer.cell_w), 2 * renderer.cell_h, QImage.Format.Format_RGB32
+    )
+    renderer.render(
+        img,
+        snapshot(
+            [
+                make_row(Cell("\u256d", fg=1), Cell("\u2500", fg=1)),  # ╭─
+                make_row(Cell("\u2502", fg=1), Cell.blank()),  # │
+            ]
+        ),
+    )
+    fg = QColor(0xCD, 0x00, 0x00)
+    cw, ch = renderer.cell_w, renderer.cell_h
+    # The top edge: the ╭'s right arm (from the arc's right end at
+    # mid-height) plus the ─ — one continuous line to the ─ cell's
+    # right edge.
+    for x in range(round(cw / 2 + 0.25 * min(cw, ch)), round(2 * cw)):
+        assert img.pixelColor(x, ch // 2) == fg, f"top edge gap at x={x}"
+    # The left edge: the ╭'s bottom arm (from the arc's top end at
+    # mid-width) plus the │ — one continuous line to the │ cell's
+    # bottom edge.
+    for y in range(round(ch / 2 - 0.25 * min(cw, ch)), 2 * ch):
+        assert img.pixelColor(round(cw / 2), y) == fg, f"left edge gap at y={y}"
 
 
 def test_block_half_rows_join_seamlessly(renderer: TerminalRenderer) -> None:
