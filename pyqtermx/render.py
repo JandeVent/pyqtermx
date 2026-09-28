@@ -58,6 +58,7 @@ _Primitive: TypeAlias = (
     tuple[Literal["fill"], float, float, float, float, Literal["fg", "bg"]]
     | tuple[Literal["line"], float, float, float, float]
     | tuple[Literal["arc"], float, float, float, int, int]
+    | tuple[Literal["round"], Literal["tl", "tr", "bl", "br"]]
     | tuple[Literal["square", "circle"], float, float, float, Literal["fill", "ring"]]
     # Polygons are only triangles (3 vertices) and diamonds (4) — kept
     # as concrete arities so mypy can narrow the draw loop's `match`.
@@ -84,6 +85,12 @@ _Primitive: TypeAlias = (
 #:   coordinates, endpoints inclusive (box arms reach the cell edges).
 #: - `("arc", cx, cy, r, a0, a1)` — an arc (fg), radius `r × u`,
 #:   angles in degrees (rounded box corners).
+#: - `("round", quadrant)` — a rounded box corner (fg): a quarter
+#:   circle of radius `0.25 × u` in the cell center plus the two legs
+#:   reaching its own cell edges. The legs are computed from the live
+#:   cell rect — a fixed `0.25` endpoint would leave a gap between a
+#:   leg and the arc on non-square cells (the arc radius scales with
+#:   `u`, the legs with their own dimension).
 #: - `("square", size, cx, cy, style)` / `("circle", size, cx, cy,
 #:   style)` — a centered shape of side/diameter `size × u`, offset by
 #:   `cx × u` / `cy × u`. `style` is "fill" or "ring" (outline).
@@ -112,17 +119,17 @@ _VECTOR_GLYPHS: dict[int, tuple[_Primitive, ...]] = {
     0x252C: (("line", 0.0, 0.5, 1.0, 0.5), ("line", 0.5, 0.5, 0.5, 1.0)),  # ┬
     0x2534: (("line", 0.0, 0.5, 1.0, 0.5), ("line", 0.5, 0.5, 0.5, 0.0)),  # ┴
     0x253C: (("line", 0.0, 0.5, 1.0, 0.5), ("line", 0.5, 0.0, 0.5, 1.0)),  # ┼
-    # Rounded corners: an arc in the cell center plus two legs — each
-    # corner reaches its own cell edges (╭ the top and left edges, etc.;
-    # the pre-table code had all four rotated 180°).
-    0x256D: (("arc", 0.5, 0.5, 0.25, 90, 90), ("line", 0.0, 0.5, 0.25, 0.5),
-             ("line", 0.5, 0.0, 0.5, 0.25)),  # ╭ top-left
-    0x256E: (("arc", 0.5, 0.5, 0.25, 90, -90), ("line", 0.75, 0.5, 1.0, 0.5),
-             ("line", 0.5, 0.0, 0.5, 0.25)),  # ╮ top-right
-    0x256F: (("arc", 0.5, 0.5, 0.25, 180, -90), ("line", 0.0, 0.5, 0.25, 0.5),
-             ("line", 0.5, 0.75, 0.5, 1.0)),  # ╯ bottom-left
-    0x2570: (("arc", 0.5, 0.5, 0.25, 0, -90), ("line", 0.75, 0.5, 1.0, 0.5),
-             ("line", 0.5, 0.75, 0.5, 1.0)),  # ╰ bottom-right
+    # Rounded corners: a quarter circle in the cell center plus two
+    # legs — each corner reaches its own cell edges (╭ the top and
+    # left edges, etc.). The legs are drawn from the live cell rect
+    # (see the `round` primitive): a fixed 0.25 endpoint would leave a
+    # gap between a leg and the arc on tall cells (the pre-fix bug —
+    # ╭╮╰╯ all showed a notch, and ╯ drew its arc in the top-left
+    # quadrant).
+    0x256D: (("round", "tl"),),  # ╭ top-left
+    0x256E: (("round", "tr"),),  # ╮ top-right
+    0x256F: (("round", "bl"),),  # ╯ bottom-left
+    0x2570: (("round", "br"),),  # ╰ bottom-right
     # -- Block characters (U+2580–259F): the whole cell in the
     #    background, the lit quadrants in the foreground — adjacent
     #    cells tile without seams.
@@ -705,6 +712,38 @@ class TerminalRenderer:
                         QRectF(x + cx * w - r, y + cy * h - r, 2 * r, 2 * r),
                         a0 * 16, a1 * 16,
                     )
+                case ("round", quadrant):
+                    # A rounded box corner: a quarter circle of radius
+                    # 0.25u in the cell center plus the two legs to its
+                    # own edges. The legs are computed from the live
+                    # rect — a fixed 0.25 endpoint would leave a gap
+                    # between a leg and the arc on non-square cells.
+                    r = 0.25 * u
+                    painter.setPen(fg)
+                    a0, sweep = {
+                        "tl": (90, 90), "tr": (90, -90),
+                        "bl": (180, 90), "br": (0, -90),
+                    }[quadrant]
+                    painter.drawArc(
+                        QRectF(x + w / 2 - r, y + h / 2 - r, 2 * r, 2 * r),
+                        a0 * 16, sweep * 16,
+                    )
+                    if quadrant in ("tl", "bl"):
+                        painter.drawLine(
+                            QPointF(x, y + h / 2), QPointF(x + w / 2 - r, y + h / 2)
+                        )
+                    else:
+                        painter.drawLine(
+                            QPointF(x + w, y + h / 2), QPointF(x + w / 2 + r, y + h / 2)
+                        )
+                    if quadrant in ("tl", "tr"):
+                        painter.drawLine(
+                            QPointF(x + w / 2, y), QPointF(x + w / 2, y + h / 2 - r)
+                        )
+                    else:
+                        painter.drawLine(
+                            QPointF(x + w / 2, y + h), QPointF(x + w / 2, y + h / 2 + r)
+                        )
                 case ("square" | "circle", size, sx, sy, style):
                     side = size * u
                     qrect = QRectF(

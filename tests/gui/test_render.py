@@ -595,6 +595,43 @@ def test_rounded_corners_reach_their_own_edges(renderer: TerminalRenderer) -> No
                 assert img.pixelColor(x, y) != fg, f"{chr(cp)}: stray {name} arm"
 
 
+def test_rounded_corner_arc_connects_to_its_arms(renderer: TerminalRenderer) -> None:
+    # ╭╮╯╰ (U+256D–2570): the arc must connect to both arms. A fixed
+    # 0.25 arm endpoint left a gap between a leg and the arc on tall
+    # cells (the arc radius scales with the cell's smaller side, the
+    # legs with their own dimension), and ╯ drew its arc in the
+    # top-left quadrant — the painted strokes must form one connected
+    # component (8-connectivity: antialiased curves meet diagonally).
+    for cp in (0x256D, 0x256E, 0x256F, 0x2570):
+        img = QImage(round(1 * renderer.cell_w), 1 * renderer.cell_h, QImage.Format.Format_RGB32)
+        renderer.render(img, snapshot([make_row(Cell(chr(cp), fg=1))]))
+        fg = QColor(0xCD, 0x00, 0x00)
+        painted = [
+            (x, y)
+            for y in range(renderer.cell_h)
+            for x in range(round(renderer.cell_w))
+            if img.pixelColor(x, y) == fg
+        ]
+        assert painted, f"{chr(cp)}: the corner must paint"
+        seen = {painted[0]}
+        stack = [painted[0]]
+        while stack:
+            x, y = stack.pop()
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    if dx == 0 and dy == 0:
+                        continue
+                    nx, ny = x + dx, y + dy
+                    if not (0 <= nx < round(renderer.cell_w) and 0 <= ny < renderer.cell_h):
+                        continue
+                    if (nx, ny) not in seen and img.pixelColor(nx, ny) == fg:
+                        seen.add((nx, ny))
+                        stack.append((nx, ny))
+        assert len(seen) == len(painted), (
+            f"{chr(cp)}: the arc must connect to both arms (gap in the corner)"
+        )
+
+
 def test_block_half_rows_join_seamlessly(renderer: TerminalRenderer) -> None:
     # ▀▀: two cells — the top halves must tile without a gap between
     # cells (the font version leaves seams at the boundaries).

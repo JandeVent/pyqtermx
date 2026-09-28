@@ -410,7 +410,10 @@ def test_scrollbar_appearance_never_clips_the_grid(
     widget.show()
     extent = widget._scrollbar.sizeHint().width()
     widget.resize(math.ceil(3 * widget._renderer.cell_w) + extent, 5 * widget._renderer.cell_h)
-    qtbot.waitUntil(lambda: bool(fake.winsizes))
+    # Wait for the debounced resize to land — the showEvent already
+    # posted the widget's initial size, so `bool(winsizes)` is true
+    # before the debounce fires.
+    qtbot.waitUntil(lambda: bool(fake.winsizes) and fake.winsizes[-1] == (5, 3))
     assert fake.winsizes[-1] == (5, 3)
     # History appears → the scrollbar shows — but no resize is posted:
     # the extent was reserved from the start, so nothing reflows/clips.
