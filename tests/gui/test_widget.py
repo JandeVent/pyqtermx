@@ -380,7 +380,11 @@ def test_resize_debounces_pty_winsize(
         math.ceil(2 * widget._renderer.cell_w) + widget._scrollbar.sizeHint().width(),
         3 * widget._renderer.cell_h,
     )
-    qtbot.waitUntil(lambda: bool(fake.winsizes))
+    # Wait for the debounced resize to land — the showEvent already
+    # posted the widget's initial size, so `bool(winsizes)` is true
+    # before the debounce fires; the assertion must wait for the
+    # resized geometry specifically.
+    qtbot.waitUntil(lambda: bool(fake.winsizes) and fake.winsizes[-1] == (3, 2))
     assert fake.winsizes[-1] == (3, 2)
 
 

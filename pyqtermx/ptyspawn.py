@@ -79,12 +79,17 @@ class Pty:
         # The child always sees a compatible TERM — the parent's value
         # is irrelevant to the session (spec: TUIs behave differently).
         # COLORTERM tells truecolor-gated apps (vim termguicolors, fish,
-        # git-delta…) that 38;2/48;2 will render correctly. COLUMNS/LINES
-        # too: some programs read them instead of the winsize ioctl.
+        # git-delta…) that 38;2/48;2 will render correctly.
         child_env["TERM"] = DEFAULT_TERM
         child_env["COLORTERM"] = COLORTERM
-        child_env["COLUMNS"] = str(cols)
-        child_env["LINES"] = str(rows)
+        # COLUMNS/LINES must NOT be set (and any inherited values are
+        # stripped): Python 3.14's shutil.get_terminal_size() — the
+        # size source of Textual and other TUIs — prefers them over the
+        # TIOCGWINSZ ioctl, and they are frozen at spawn, so a resize
+        # would never reach the app. The ioctl is authoritative (xterm
+        # sets neither).
+        child_env.pop("COLUMNS", None)
+        child_env.pop("LINES", None)
 
         # macOS only propagates TIOCSWINSZ from the slave before a session
         # exists — set the initial size on the slave, then the child's

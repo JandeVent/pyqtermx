@@ -110,13 +110,18 @@ class WinPty:
         child_env = dict(os.environ)
         if env:
             child_env.update(env)
-        # The child always sees a compatible TERM and the geometry,
-        # exactly like the Unix path (spec: TUIs behave differently).
-        # COLORTERM advertises truecolor support (38;2/48;2).
+        # The child always sees a compatible TERM, exactly like the
+        # Unix path (spec: TUIs behave differently). COLORTERM
+        # advertises truecolor support (38;2/48;2). COLUMNS/LINES must
+        # NOT be set (and any inherited values are stripped): Python
+        # 3.14's shutil.get_terminal_size() — the size source of
+        # Textual and other TUIs — prefers them over the console size,
+        # and they are frozen at spawn, so a resize would never reach
+        # the app. ConPTY's dimensions are authoritative.
         child_env["TERM"] = DEFAULT_TERM
         child_env["COLORTERM"] = COLORTERM
-        child_env["COLUMNS"] = str(cols)
-        child_env["LINES"] = str(rows)
+        child_env.pop("COLUMNS", None)
+        child_env.pop("LINES", None)
 
         try:
             self._pty = _WinPtyProcess.spawn(

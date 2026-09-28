@@ -98,9 +98,12 @@ info panel and the block-letter banner and box frame drawn as vectors
 **Session & PTY**
 
 - Qt-free `Pty` layer: fork + `setsid`, controlling terminal and
-  foreground process group, `TERM=xterm-256color` and `COLUMNS`/`LINES`
-  forced for the child, `TIOCSWINSZ` resize propagation, graceful
-  close (EOF → SIGTERM → SIGKILL with bounded waits).
+  foreground process group, `TERM=xterm-256color` and
+  `COLORTERM=truecolor` forced for the child (COLUMNS/LINES are
+  deliberately *not* set — Python 3.14's `shutil.get_terminal_size()`
+  prefers them over the `TIOCSWINSZ` ioctl, and they would go stale on
+  resize), `TIOCSWINSZ` resize propagation, graceful close (EOF →
+  SIGTERM → SIGKILL with bounded waits).
 - Spawn in a working directory: `Pty(cwd=...)` chdirs the child before
   exec, so a session can start in a requested folder.
 - Foreground-job close guard: `Pty.has_foreground_job()` (via

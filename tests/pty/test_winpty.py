@@ -100,16 +100,21 @@ def spawn_fake(fake_backend, command=None, **kwargs) -> tuple[WinPty, FakeWinPty
 
 def test_spawn_passes_command_env_and_geometry(fake_backend) -> None:
     pty, fake = spawn_fake(
-        fake_backend, ["prog.exe", "arg"], env={"FOO": "bar"}, rows=30, cols=100
+        fake_backend,
+        ["prog.exe", "arg"],
+        env={"FOO": "bar", "COLUMNS": "999", "LINES": "999"},
+        rows=30,
+        cols=100,
     )
     argv, cwd, env, dimensions = fake.spawn_args
     assert argv == ["prog.exe", "arg"]
     assert env["FOO"] == "bar"
     assert env["TERM"] == "xterm-256color"
     assert env["COLORTERM"] == "truecolor"
-    # Geometry wins over a stale COLUMNS/LINES in the supplied env.
-    assert env["COLUMNS"] == "100"
-    assert env["LINES"] == "30"
+    # COLUMNS/LINES must NOT reach the child — even stale values from
+    # the supplied env (see the rationale in win_pty.WinPty.__init__).
+    assert "COLUMNS" not in env
+    assert "LINES" not in env
     assert dimensions == (30, 100)
     assert pty.pid == 4242
     assert pty.is_running()

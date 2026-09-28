@@ -152,17 +152,21 @@ def test_child_gets_colorterm_truecolor() -> None:
         pty.close()
 
 
-def test_child_gets_geometry_environment() -> None:
+def test_child_does_not_get_geometry_environment() -> None:
+    """COLUMNS/LINES must NOT reach the child — even stale values from
+    the supplied env (see the rationale in ptyspawn.Pty.__init__: they
+    would freeze the size Python 3.14's shutil reports to TUIs)."""
     pty = spawn_child(
         "import os\n"
         "print('GEOM:%sx%s' % (os.environ.get('COLUMNS', ''),"
         " os.environ.get('LINES', '')), flush=True)\n",
         rows=33,
         cols=120,
+        env={"COLUMNS": "999", "LINES": "999"},  # stale values must be stripped
     )
     try:
         out = read_until(pty, b"GEOM:")
-        assert b"GEOM:120x33" in out
+        assert b"GEOM:x" in out
     finally:
         pty.close()
 
