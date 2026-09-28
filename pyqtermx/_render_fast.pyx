@@ -101,8 +101,8 @@ cpdef list collect_runs(row, bint reverse_video, sel_range=None,
     renderer's palette, or the module defaults when omitted) used by
     the SGR 2 dim mix to resolve -1 cell colors. `codes` is the
     renderer's vector-glyph codepoint set (`_VECTOR_CODES`) — the
-    dense box/block ranges are C checks, the sparse geometric shapes
-    and braille fall through to the set.
+    dense block range is a C check, the sparse geometric shapes
+    fall through to the set (box-drawing U+2500-257F is font-handled).
 
     Returns a flat list of tuples (the draw loop in `paint_row` walks
     them; render.py's fallback `_paint_row` is the reference):
@@ -223,7 +223,7 @@ cpdef list collect_runs(row, bint reverse_video, sel_range=None,
         # The `cp > 0x7F` gate keeps the ASCII hot path to C
         # comparisons — the set lookup only runs for non-ASCII cells
         # (vector glyphs live above ASCII; U+00B7 is the lowest).
-        if (cp > 0x7F and (0x2500 <= cp <= 0x257F or 0x2580 <= cp <= 0x259F or cp in codes)) or wide:
+        if (cp > 0x7F and (0x2580 <= cp <= 0x259F or cp in codes)) or wide:
             # Box/block/vector-shape/wide chars break the run and draw
             # individually.
             if has_fg:
@@ -363,7 +363,7 @@ cpdef void paint_row(painter, renderer, int viewport_row, row, bint reverse_vide
             rect = QRectF(col * cw, y0, cw, ch)
             if wide:
                 rect.setWidth(2 * cw)
-            if 0x2500 <= cp <= 0x257F or 0x2580 <= cp <= 0x259F or cp in codes:
+            if 0x2580 <= cp <= 0x259F or cp in codes:
                 # Vector glyph: the renderer's primitive table paints it.
                 renderer._draw_vector_glyph(painter, rect, cp, fg, bg)
             else:

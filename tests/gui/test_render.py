@@ -497,171 +497,31 @@ def test_set_palette_repaints_blank_cell_with_new_bg(renderer: TerminalRenderer,
     assert cell_pixel(image, renderer, 0) == QColor(0x12, 0x34, 0x56)
 
 
-# -- vector box-drawing and block characters (no font seams) -------------
+# -- box-drawing glyphs render through the font -------------------------
 
 
-def test_box_drawing_horizontal_line_touches_both_edges(renderer: TerminalRenderer) -> None:
-    # ─ (U+2500): a full-width line at mid-height — the font version
-    # leaves gaps at the cell edges; drawLine must not.
-    img = QImage(round(1 * renderer.cell_w), 1 * renderer.cell_h, QImage.Format.Format_RGB32)
-    renderer.render(img, snapshot([make_row(Cell("─", fg=1))]))
-    cy = renderer.cell_h // 2
-    for x in range(round(renderer.cell_w)):
-        assert img.pixelColor(x, cy) == QColor(0xCD, 0x00, 0x00)
-    assert img.pixelColor(0, 0) != QColor(0xCD, 0x00, 0x00)  # nothing above
+def test_box_drawing_glyphs_render_through_the_font(renderer: TerminalRenderer) -> None:
+    # Box-drawing lines and corners (U+2500–253C, U+256D–2570) are
+    # deliberately NOT vector-drawn — the font's glyphs are designed
+    # to join across cells (the vector table only covers block
+    # characters and geometric shapes). They must not be classified as
+    # vector codepoints, and each glyph must paint through the normal
+    # text path.
+    from pyqtermx.render import _VECTOR_CODES
 
-
-def test_box_drawing_corner_is_open_on_the_unjoined_side(renderer: TerminalRenderer) -> None:
-    # ┌ (U+250C): horizontal reaches the right edge, vertical the bottom;
-    # the top and left edges stay open (the neighbor cells join there).
-    img = QImage(round(1 * renderer.cell_w), 1 * renderer.cell_h, QImage.Format.Format_RGB32)
-    renderer.render(img, snapshot([make_row(Cell("\u250c", fg=1))]))
-    cx, cy = round(renderer.cell_w // 2), renderer.cell_h // 2
-    fg = QColor(0xCD, 0x00, 0x00)
-    assert img.pixelColor(round(renderer.cell_w) - 1, cy) == fg
-    assert img.pixelColor(cx, renderer.cell_h - 1) == fg
-    assert img.pixelColor(0, cy) != fg  # left open
-    assert img.pixelColor(cx, 0) != fg  # top open
-
-
-#: Every table glyph with the cell edges its strokes must reach. A wrong
-#: segment (a diagonal, or a missing arm) shows up as a colored pixel
-#: where the cell must stay open, or an open edge where an arm belongs.
-_BOX_ARMS = {
-    0x2500: ("L", "R"),  # ─
-    0x2502: ("T", "B"),  # │
-    0x250C: ("R", "B"),  # ┌
-    0x2510: ("L", "B"),  # ┐
-    0x2514: ("R", "T"),  # └
-    0x2518: ("L", "T"),  # ┘
-    0x251C: ("T", "B", "R"),  # ├ — vertical at center + right arm
-    0x2524: ("T", "B", "L"),  # ┤ — vertical at center + left arm
-    0x252C: ("L", "R", "B"),  # ┬
-    0x2534: ("L", "R", "T"),  # ┴
-    0x253C: ("L", "R", "T", "B"),  # ┼
-}
-
-
-def test_box_drawing_arms_are_orthogonal(renderer: TerminalRenderer) -> None:
-    # └ ┘ ┴ used to paint a diagonal from the top-left corner to the
-    # center (0x6D in the DEC graphics set) — arms must meet the cell
-    # edges at right angles, and the open corner must stay empty.
-    for cp, arms in _BOX_ARMS.items():
+    glyphs = [
+        0x2500, 0x2502,  # ─ │
+        0x250C, 0x2510, 0x2514, 0x2518,  # ┌ ┐ └ ┘
+        0x251C, 0x2524, 0x252C, 0x2534, 0x253C,  # ├ ┤ ┬ ┴ ┼
+        0x256D, 0x256E, 0x256F, 0x2570,  # ╭ ╮ ╯ ╰
+    ]
+    assert not (_VECTOR_CODES & set(glyphs)), "box-drawing must stay in the font"
+    for cp in glyphs:
         img = QImage(round(1 * renderer.cell_w), 1 * renderer.cell_h, QImage.Format.Format_RGB32)
         renderer.render(img, snapshot([make_row(Cell(chr(cp), fg=1))]))
-        fg = QColor(0xCD, 0x00, 0x00)
-        cx, cy = round(renderer.cell_w // 2), renderer.cell_h // 2
-        probes = {
-            "T": (cx, 0),
-            "B": (cx, renderer.cell_h - 1),
-            "L": (0, cy),
-            "R": (round(renderer.cell_w) - 1, cy),
-        }
-        for name, (x, y) in probes.items():
-            if name in arms:
-                assert img.pixelColor(x, y) == fg, f"{chr(cp)}: {name} arm missing"
-            else:
-                assert img.pixelColor(x, y) != fg, f"{chr(cp)}: stray {name} arm"
-        # The top-left corner: a diagonal segment would paint it.
-        assert img.pixelColor(0, 0) != fg, f"{chr(cp)}: diagonal in the corner"
-
-
-def test_rounded_corners_reach_their_own_edges(renderer: TerminalRenderer) -> None:
-    # ╭╮╯╰ (U+256D–2570): each corner's strokes must reach the cell
-    # edges it joins in a frame — ╭ the right and bottom edges, ╮ left
-    # and bottom, ╯ right and top, ╰ left and top (the font's ╭─── is
-    # a continuous line at mid-height). The pre-fix table drew all
-    # four rotated 180° (╭ reached top and left).
-    corners = {
-        0x256D: ("R", "B"),  # ╭
-        0x256E: ("L", "B"),  # ╮
-        0x256F: ("R", "T"),  # ╯
-        0x2570: ("L", "T"),  # ╰
-    }
-    for cp, arms in corners.items():
-        img = QImage(round(1 * renderer.cell_w), 1 * renderer.cell_h, QImage.Format.Format_RGB32)
-        renderer.render(img, snapshot([make_row(Cell(chr(cp), fg=1))]))
-        fg = QColor(0xCD, 0x00, 0x00)
-        cx, cy = round(renderer.cell_w // 2), renderer.cell_h // 2
-        probes = {
-            "T": (cx, 0),
-            "B": (cx, renderer.cell_h - 1),
-            "L": (0, cy),
-            "R": (round(renderer.cell_w) - 1, cy),
-        }
-        for name, (x, y) in probes.items():
-            if name in arms:
-                assert img.pixelColor(x, y) == fg, f"{chr(cp)}: {name} arm missing"
-            else:
-                assert img.pixelColor(x, y) != fg, f"{chr(cp)}: stray {name} arm"
-
-
-def test_rounded_corner_arc_connects_to_its_arms(renderer: TerminalRenderer) -> None:
-    # ╭╮╯╰ (U+256D–2570): the arc must connect to both arms. A fixed
-    # 0.25 arm endpoint left a gap between a leg and the arc on tall
-    # cells (the arc radius scales with the cell's smaller side, the
-    # legs with their own dimension), and ╯ drew its arc in the
-    # top-left quadrant — the painted strokes must form one connected
-    # component (8-connectivity: antialiased curves meet diagonally).
-    for cp in (0x256D, 0x256E, 0x256F, 0x2570):
-        img = QImage(round(1 * renderer.cell_w), 1 * renderer.cell_h, QImage.Format.Format_RGB32)
-        renderer.render(img, snapshot([make_row(Cell(chr(cp), fg=1))]))
-        fg = QColor(0xCD, 0x00, 0x00)
-        painted = [
-            (x, y)
-            for y in range(renderer.cell_h)
-            for x in range(round(renderer.cell_w))
-            if img.pixelColor(x, y) == fg
-        ]
-        assert painted, f"{chr(cp)}: the corner must paint"
-        seen = {painted[0]}
-        stack = [painted[0]]
-        while stack:
-            x, y = stack.pop()
-            for dx in (-1, 0, 1):
-                for dy in (-1, 0, 1):
-                    if dx == 0 and dy == 0:
-                        continue
-                    nx, ny = x + dx, y + dy
-                    if not (0 <= nx < round(renderer.cell_w) and 0 <= ny < renderer.cell_h):
-                        continue
-                    if (nx, ny) not in seen and img.pixelColor(nx, ny) == fg:
-                        seen.add((nx, ny))
-                        stack.append((nx, ny))
-        assert len(seen) == len(painted), (
-            f"{chr(cp)}: the arc must connect to both arms (gap in the corner)"
+        assert cell_has_color_approx(img, renderer, 0, QColor(0xCD, 0x00, 0x00)), (
+            f"{chr(cp)}: the font must paint the glyph"
         )
-
-
-def test_rounded_corner_joins_its_frame_seamlessly(renderer: TerminalRenderer) -> None:
-    # ╭─ / │ : the corner's arms must meet the ─ and │ neighbors — the
-    # top edge is one continuous line at mid-height, the left edge one
-    # continuous line at mid-width (the pre-fix table drew the corners
-    # rotated 180°, leaving a gap between ╭ and ─).
-    img = QImage(
-        round(2 * renderer.cell_w), 2 * renderer.cell_h, QImage.Format.Format_RGB32
-    )
-    renderer.render(
-        img,
-        snapshot(
-            [
-                make_row(Cell("\u256d", fg=1), Cell("\u2500", fg=1)),  # ╭─
-                make_row(Cell("\u2502", fg=1), Cell.blank()),  # │
-            ]
-        ),
-    )
-    fg = QColor(0xCD, 0x00, 0x00)
-    cw, ch = renderer.cell_w, renderer.cell_h
-    # The top edge: the ╭'s right arm (from the arc's right end at
-    # mid-height) plus the ─ — one continuous line to the ─ cell's
-    # right edge.
-    for x in range(round(cw / 2 + 0.25 * min(cw, ch)), round(2 * cw)):
-        assert img.pixelColor(x, ch // 2) == fg, f"top edge gap at x={x}"
-    # The left edge: the ╭'s bottom arm (from the arc's top end at
-    # mid-width) plus the │ — one continuous line to the │ cell's
-    # bottom edge.
-    for y in range(round(ch / 2 - 0.25 * min(cw, ch)), 2 * ch):
-        assert img.pixelColor(round(cw / 2), y) == fg, f"left edge gap at y={y}"
 
 
 def test_block_half_rows_join_seamlessly(renderer: TerminalRenderer) -> None:
@@ -738,14 +598,14 @@ def test_ring_shapes_draw_outlines_not_fills(renderer: TerminalRenderer, glyph: 
 
 @pytest.mark.parametrize("glyph", ["\u2503", "\u2551", "\u2550", "\u2567"])  # ┃ ║ ═ ╧
 def test_unlisted_box_variants_fall_back_to_the_font(renderer: TerminalRenderer, glyph: str) -> None:
-    # Heavy/double/dashed box variants sit inside the dense 0x2500–257F
-    # range the Cython path classifies in C, but they are not in
-    # `_VECTOR_GLYPHS` — the vector drawer must fall back to the font
-    # instead of raising (a real-world crash: opencode renders ┃).
+    # Heavy/double/dashed box variants (┃ ║ ═ ╧ …) are font-rendered
+    # like every other box-drawing glyph — they must paint through the
+    # normal text path instead of raising (a real-world crash:
+    # opencode renders ┃).
     img = QImage(round(1 * renderer.cell_w), 1 * renderer.cell_h, QImage.Format.Format_RGB32)
     renderer.render(img, snapshot([make_row(Cell(glyph, fg=1))]))
     assert cell_has_color_approx(img, renderer, 0, QColor(0xCD, 0x00, 0x00)), (
-        f"{glyph}: the font fallback must paint"
+        f"{glyph}: the font must paint the glyph"
     )
 
 

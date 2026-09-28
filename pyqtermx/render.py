@@ -11,16 +11,18 @@ colors 0–7 step up to their bright entries), reverse (fg/bg swap),
 dim (fg mixed halfway toward bg), underline, strike, overline, hidden
 (no glyph), italic (font flag), and DECSCNM ?5 (whole-screen reverse).
 
-Box-drawing (U+2500–257F), block characters (U+2580–259F), and
-geometric shapes (squares, circles, diamonds, triangles, bullets) are
-drawn as vectors — painter.drawLine / fillRect / drawEllipse /
-drawPolygon from the `_VECTOR_GLYPHS` primitive table — not through
-the font: box and block glyphs join seamlessly across cells, and
-small shapes (TUI spinner dots, list bullets) stay crisp instead of
-antialiasing to a speck. Braille stays in the font — its glyphs carry
-the correct dot patterns. SGR blink is parsed but not yet painted
-(needs a widget timer); the *cursor* blink is the widget's job —
-`paint` takes a `cursor_visible` override the widget's timer drives.
+Block characters (U+2580–259F) and geometric shapes (squares,
+circles, diamonds, triangles, bullets) are drawn as vectors —
+painter.drawLine / fillRect / drawEllipse / drawPolygon from the
+`_VECTOR_GLYPHS` primitive table — not through the font: block glyphs
+join seamlessly across cells, and small shapes (TUI spinner dots,
+list bullets) stay crisp instead of antialiasing to a speck.
+Box-drawing lines and corners (U+2500–257F) are left to the font —
+their glyphs are designed to join across cells. Braille stays in the
+font — its glyphs carry the correct dot patterns. SGR blink is
+parsed but not yet painted (needs a widget timer); the *cursor*
+blink is the widget's job — `paint` takes a `cursor_visible`
+override the widget's timer drives.
 """
 
 from __future__ import annotations
@@ -57,8 +59,6 @@ DEFAULT_BG = QColor(*DEFAULT_BG_RGB)
 _Primitive: TypeAlias = (
     tuple[Literal["fill"], float, float, float, float, Literal["fg", "bg"]]
     | tuple[Literal["line"], float, float, float, float]
-    | tuple[Literal["arc"], float, float, float, int, int]
-    | tuple[Literal["round"], Literal["tl", "tr", "bl", "br"]]
     | tuple[Literal["square", "circle"], float, float, float, Literal["fill", "ring"]]
     # Polygons are only triangles (3 vertices) and diamonds (4) — kept
     # as concrete arities so mypy can narrow the draw loop's `match`.
@@ -70,10 +70,12 @@ _Primitive: TypeAlias = (
 
 #: Vector-drawn glyphs — codepoint → cell-relative primitives. The font
 #: is only used where it is good; these glyphs are painted directly so
-#: adjacent cells join seamlessly (box/block), and so tiny geometric
-#: shapes (spinner dots, bullets) survive antialiasing instead of
-#: washing out to a speck. One table, one draw path — no per-glyph
-#: exceptions.
+#: adjacent cells join seamlessly (block characters), and so tiny
+#: geometric shapes (spinner dots, bullets) survive antialiasing
+#: instead of washing out to a speck. One table, one draw path — no
+#: per-glyph exceptions. Box-drawing lines and corners (U+2500–257F)
+#: are deliberately NOT here: the font draws them (their glyphs are
+#: designed to join across cells).
 #:
 #: Primitive kinds (geometry is cell-relative unless noted; `u` is the
 #: cell's smaller side, so shapes stay square on tall fonts):
@@ -83,15 +85,6 @@ _Primitive: TypeAlias = (
 #:   so the lit quadrants tile the cell without seams.
 #: - `("line", x1, y1, x2, y2)` — a stroke (fg), cell-relative
 #:   coordinates, endpoints inclusive (box arms reach the cell edges).
-#: - `("arc", cx, cy, r, a0, a1)` — an arc (fg), radius `r × u`,
-#:   angles in degrees (rounded box corners).
-#: - `("round", quadrant)` — a rounded box corner (fg): a half-circle
-#:   arc whose endpoints sit at mid-height, plus the two legs to the
-#:   cell edges the corner joins in a frame (╭ the right and bottom
-#:   edges). The legs are computed from the live cell rect — a fixed
-#:   `0.25` endpoint would leave a gap between a leg and the arc on
-#:   non-square cells (the arc radius scales with `u`, the legs with
-#:   their own dimension).
 #: - `("square", size, cx, cy, style)` / `("circle", size, cx, cy,
 #:   style)` — a centered shape of side/diameter `size × u`, offset by
 #:   `cx × u` / `cy × u`. `style` is "fill" or "ring" (outline).
@@ -107,30 +100,6 @@ def _poly_prim(size: float, style: Literal["fill", "ring"], *verts: float) -> _P
 
 
 _VECTOR_GLYPHS: dict[int, tuple[_Primitive, ...]] = {
-    # -- Box drawing (U+2500–257F): strokes reach the cell edges so
-    #    adjacent cells join without font gaps.
-    0x2500: (("line", 0.0, 0.5, 1.0, 0.5),),  # ─
-    0x2502: (("line", 0.5, 0.0, 0.5, 1.0),),  # │
-    0x250C: (("line", 0.5, 0.5, 1.0, 0.5), ("line", 0.5, 0.5, 0.5, 1.0)),  # ┌
-    0x2510: (("line", 0.0, 0.5, 0.5, 0.5), ("line", 0.5, 0.5, 0.5, 1.0)),  # ┐
-    0x2514: (("line", 0.5, 0.5, 1.0, 0.5), ("line", 0.5, 0.5, 0.5, 0.0)),  # └
-    0x2518: (("line", 0.0, 0.5, 0.5, 0.5), ("line", 0.5, 0.5, 0.5, 0.0)),  # ┘
-    0x251C: (("line", 0.5, 0.0, 0.5, 1.0), ("line", 0.5, 0.5, 1.0, 0.5)),  # ├
-    0x2524: (("line", 0.5, 0.0, 0.5, 1.0), ("line", 0.0, 0.5, 0.5, 0.5)),  # ┤
-    0x252C: (("line", 0.0, 0.5, 1.0, 0.5), ("line", 0.5, 0.5, 0.5, 1.0)),  # ┬
-    0x2534: (("line", 0.0, 0.5, 1.0, 0.5), ("line", 0.5, 0.5, 0.5, 0.0)),  # ┴
-    0x253C: (("line", 0.0, 0.5, 1.0, 0.5), ("line", 0.5, 0.0, 0.5, 1.0)),  # ┼
-    # Rounded corners: a quarter circle in the cell center plus two
-    # legs — each corner joins the frame edges it connects to (╭ the
-    # right and bottom edges, etc.; the pre-fix table drew all four
-    # rotated 180°, leaving a gap between the corner and its ─/│
-    # neighbors). The legs are drawn from the live cell rect (see the
-    # `round` primitive): a fixed 0.25 endpoint would leave a gap
-    # between a leg and the arc on tall cells.
-    0x256D: (("round", "tl"),),  # ╭ top-left
-    0x256E: (("round", "tr"),),  # ╮ top-right
-    0x256F: (("round", "bl"),),  # ╯ bottom-left
-    0x2570: (("round", "br"),),  # ╰ bottom-right
     # -- Block characters (U+2580–259F): the whole cell in the
     #    background, the lit quadrants in the foreground — adjacent
     #    cells tile without seams.
@@ -674,22 +643,20 @@ class TerminalRenderer:
         self, painter: QPainter, rect: QRectF, cp: int, fg: QColor, bg: QColor
     ) -> None:
         """Paint a vector glyph's primitives (see `_VECTOR_GLYPHS`) —
-        the single draw path for every non-font glyph: box-drawing
-        strokes, block quadrant fills, and the centered geometric
-        shapes. `fg`/`bg` are the cell's rendered
-        colors (reverse/selection/dim already applied). `rect` is a
-        float cell rect — strokes land at fractional cell boundaries,
-        so adjacent cells join exactly (QPointF: PyQt6's int drawLine
-        overload rejects floats)."""
+        the single draw path for every non-font glyph: block quadrant
+        fills and the centered geometric shapes. `fg`/`bg` are the
+        cell's rendered colors (reverse/selection/dim already
+        applied). `rect` is a float cell rect — strokes land at
+        fractional cell boundaries, so adjacent cells join exactly
+        (QPointF: PyQt6's int drawLine overload rejects floats)."""
         x, y = rect.left(), rect.top()
         w, h = rect.width(), rect.height()
         u = min(w, h)
         prims = _VECTOR_GLYPHS.get(cp)
         if prims is None:
             # Classified as vector by a dense range (the Cython path
-            # checks 0x2500–0x259F in C) but absent from the table —
-            # the heavy/double/dashed box variants. The font draws
-            # them, like the pre-table fallback.
+            # checks 0x2580–0x259F in C) but absent from the table —
+            # a safety net; the font draws the glyph.
             painter.setPen(fg)
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, chr(cp))
             return
@@ -706,51 +673,6 @@ class TerminalRenderer:
                         QPointF(x + x1 * w, y + y1 * h),
                         QPointF(x + x2 * w, y + y2 * h),
                     )
-                case ("arc", cx, cy, r, a0, a1):
-                    painter.setPen(fg)
-                    r = r * u
-                    painter.drawArc(
-                        QRectF(x + cx * w - r, y + cy * h - r, 2 * r, 2 * r),
-                        a0 * 16, a1 * 16,
-                    )
-                case ("round", quadrant):
-                    # A rounded box corner: a half-circle arc whose
-                    # endpoints sit at mid-height, plus the two legs to
-                    # the cell edges the corner joins — ╭ the right and
-                    # bottom edges, so the frame's ─ and │ neighbors
-                    # meet it seamlessly (the font's ╭─── is one
-                    # continuous line at mid-height; the pre-fix table
-                    # drew all four rotated 180°, leaving a gap between
-                    # the corner and its neighbors). The legs are
-                    # computed from the live rect — a fixed 0.25
-                    # endpoint would leave a gap between a leg and the
-                    # arc on non-square cells.
-                    r = 0.25 * u
-                    painter.setPen(fg)
-                    # The arc: the top half circle for the top corners,
-                    # the bottom half for the bottom ones — endpoints
-                    # at mid-height, where the horizontal leg joins.
-                    a0, sweep = (0, 180) if quadrant in ("tl", "tr") else (0, -180)
-                    painter.drawArc(
-                        QRectF(x + w / 2 - r, y + h / 2 - r, 2 * r, 2 * r),
-                        a0 * 16, sweep * 16,
-                    )
-                    if quadrant in ("tl", "bl"):
-                        painter.drawLine(
-                            QPointF(x + w / 2 + r, y + h / 2), QPointF(x + w, y + h / 2)
-                        )
-                    else:
-                        painter.drawLine(
-                            QPointF(x, y + h / 2), QPointF(x + w / 2 - r, y + h / 2)
-                        )
-                    if quadrant in ("tl", "tr"):
-                        painter.drawLine(
-                            QPointF(x + w / 2, y + h / 2 - r), QPointF(x + w / 2, y + h)
-                        )
-                    else:
-                        painter.drawLine(
-                            QPointF(x + w / 2, y), QPointF(x + w / 2, y + h / 2 + r)
-                        )
                 case ("square" | "circle", size, sx, sy, style):
                     side = size * u
                     qrect = QRectF(
